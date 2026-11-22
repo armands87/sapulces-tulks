@@ -118,7 +118,76 @@
     return (inTok / 1e6) * opts.priceIn + (outTok / 1e6) * opts.priceOut;
   }
 
+  /*
+   * Turn an OpenAI HTTP error into a Latvian message + whether a retry makes sense.
+   * status 0 = network error / timeout.
+   */
+  function classifyError(status, bodyText, model) {
+    var code = '';
+    try { var j = JSON.parse(bodyText || '{}'); code = (j.error && (j.error.code || j.error.type)) || ''; } catch (e) {}
+    if (status === 0) return { msg: 'Nav savienojuma ar OpenAI (internets vai noildze)', retry: true, fatal: false };
+    if (status === 401) return { msg: 'Nederīga OpenAI atslēga. Atver ⚙ un ielīmē pareizo.', retry: false, fatal: true };
+    if (status === 429 && /insufficient_quota|billing/.test(code + bodyText))
+      return { msg: 'OpenAI kontā beidzies kredīts vai sasniegts tēriņu limits.', retry: false, fatal: true };
+    if (status === 429) return { msg: 'OpenAI ātruma limits (429), mēģina vēlreiz', retry: true, fatal: false };
+    if (status === 404 || code === 'model_not_found')
+      return { msg: 'Modelis "' + model + '" nav pieejams. Atver ⚙ un izvēlies citu.', retry: false, fatal: true };
+    if (status === 400) return { msg: 'OpenAI noraidīja pieprasījumu (400). Pārbaudi modeli ⚙.', retry: false, fatal: true };
+    if (status >= 500) return { msg: 'OpenAI serveru kļūda (' + status + '), mēģina vēlreiz', retry: true, fatal: false };
+    return { msg: 'OpenAI kļūda ' + status, retry: false, fatal: false };
+  }
+
+  /* Retry delay for translation attempts (ms). */
+  function retryDelay(attempt) {
+    return [800, 2500, 6000][Math.min(attempt, 2)];
+  }
+
+  /*
+   * Which lines are visible and how. mode 'focus': only the newest line big,
+   * the one before it small and dim. mode 'history': last n lines, older fade,
+   * newest marked as current (yellow in CSS).
+   * Returns array (oldest first) of {show, opacity, role} where role is
+   * 'current' | 'prev' | 'old'.
+   */
+  function lineStyles(mode, total, n) {
+    var out = [];
+    for (var i = 0; i < total; i++) {
+      var fromEnd = total - 1 - i;
+      var role = fromEnd === 0 ? 'current' : (fromEnd === 1 ? 'prev' : 'old');
+      if (mode === 'focus') {
+        out.push({ show: fromEnd <= 1, opacity: fromEnd === 0 ? 1 : 0.45, role: role });
+        continue;
+      }
+      if (fromEnd >= n) { out.push({ show: false, opacity: 0, role: role }); continue; }
+      var fadeZone = Math.min(3, Math.max(1, n - 3));
+      var posFromOldest = n - 1 - fromEnd;
+      var op = posFromOldest < fadeZone ? 0.25 + 0.6 * posFromOldest / fadeZone : 1;
+      out.push({ show: true, opacity: Math.round(op * 100) / 100, role: role });
+    }
+    return out;
+  }
+
+  /*
+   * Recognition health check, run by the watchdog every few seconds.
+   * Returns 'ok' | 'start' (nothing running, nothing scheduled) | 'kick' (hung).
+   */
+  function watchdogAction(st, now) {
+    if (!st.running || st.hidden) return 'ok';
+    if (st.active) {
+      // active but silent for too long: Chrome Android sometimes stops delivering events
+      return now - st.lastEventAt > st.silentLimitMs ? 'kick' : 'ok';
+    }
+    if (st.starting && now - st.startCalledAt < 6000) return 'ok'; // waiting for onstart
+    if (st.starting) return 'kick'; // start() never produced onstart
+    if (st.restartPending && now - st.restartScheduledAt < 8000) return 'ok';
+    return 'start';
+  }
+
   root.TCore = {
+    classifyError: classifyError,
+    retryDelay: retryDelay,
+    lineStyles: lineStyles,
+    watchdogAction: watchdogAction,
     SYSTEM_PROMPT: SYSTEM_PROMPT,
     buildMessages: buildMessages,
     buildBody: buildBody,

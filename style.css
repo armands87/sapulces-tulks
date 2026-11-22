@@ -120,3 +120,57 @@ dialog input[type=checkbox] { width: 24px; height: 24px; flex: none; }
 .note { margin: 0; font-size: 14px; color: var(--dim); }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .actions .primary { background: var(--accent); color: #fff; margin-left: auto; }
+
+/* ---------- Modes ---------- */
+:root { --hl-fg: #ffd60a; --hl-bg: transparent; }
+body.light { --hl-fg: #000; --hl-bg: #ffe94d; }
+
+/* A: only the current sentence, previous one small and dim above it */
+body.mode-focus .line.prev { font-size: .42em; margin-bottom: .6em; }
+body.mode-focus .line.prev .lv { font-weight: 500; }
+body.mode-focus .line.current .lv { opacity: 1; }
+body.mode-focus .line { transition: none; }
+
+/* B: full history, live sentence in yellow (yellow marker on white theme) */
+body.mode-history .line.current .lv {
+  color: var(--hl-fg);
+  background: var(--hl-bg);
+  display: inline;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  padding: 0 .12em;
+  border-radius: .12em;
+  opacity: 1;
+}
+body.mode-history .line.current .en { margin-top: .3em; }
+
+/* ---------- Error bar and status ---------- */
+.error-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #ffb300;
+  color: #000;
+  font-size: 18px;
+  font-weight: 600;
+}
+.error-bar.fatal { background: #d32f2f; color: #fff; }
+.error-bar span { flex: 1; }
+.error-bar button { background: rgba(0,0,0,.15); color: inherit; min-height: 36px; }
+.error-bar[hidden] { display: none; }
+.status.sound::before { animation: pulse .8s ease-in-out infinite alternate; }
+@keyframes pulse { from { opacity: 1; } to { opacity: .2; } }
+.diag {
+  font-size: 12px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: var(--bg);
+  color: var(--fg);
+  padding: 8px;
+  border-radius: 8px;
+  margin: 0;
+}
+/* focus mode: keep the sentence in the vertical middle of the screen */
+body.mode-focus #feed::after { content: ""; flex: 1 0 0; }

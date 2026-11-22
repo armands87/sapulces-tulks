@@ -16,14 +16,20 @@
     <span id="status" class="status off" aria-live="polite">Gaida</span>
     <div class="tools">
       <button id="smaller" aria-label="Mazāks teksts">A−</button>
-      <input id="size" type="range" min="20" max="96" step="2" aria-label="Teksta izmērs">
+      <input id="size" type="range" min="20" max="110" step="2" aria-label="Teksta izmērs">
       <button id="bigger" aria-label="Lielāks teksts">A+</button>
+      <button id="toggleMode" aria-label="Režīms">1</button>
       <button id="toggleEn" aria-label="Rādīt angļu tekstu">EN</button>
       <button id="toggleTheme" aria-label="Mainīt fonu">◐</button>
       <button id="fullscreen" aria-label="Pilnekrāns">⛶</button>
       <button id="openSettings" aria-label="Iestatījumi">⚙</button>
     </div>
   </header>
+
+  <div id="errorBar" class="error-bar" role="alert" hidden>
+    <span id="errorText"></span>
+    <button id="errorClose" aria-label="Aizvērt kļūdas ziņu">×</button>
+  </div>
 
   <main id="feed" aria-live="polite">
     <p id="hint" class="hint">Nospied <b>Sākt</b> un novieto telefonu pie skaļruņa.<br>Pirmajā reizē atver ⚙ un ielīmē OpenAI atslēgu.</p>
@@ -62,6 +68,14 @@
       </label>
       <p class="note">Ieteicams gpt-4.1-mini (ātrs, labs latviešu valodā). Lētāk: gpt-4o-mini.</p>
 
+      <label>Rādīšanas režīms
+        <select id="mode">
+          <option value="focus">Tikai pašreizējais teikums (iepriekšējais mazs virs tā)</option>
+          <option value="history">Visa vēsture, pašreizējais izcelts dzeltenā</option>
+        </select>
+      </label>
+      <p class="note">Ātri pārslēgt: poga 1 / ≡ augšējā joslā.</p>
+
       <label class="row"><input id="interim" type="checkbox"> Ātrais režīms: tulkot jau runas laikā (zemāka aizture, ~2x dārgāk)</label>
       <label class="row"><input id="showEn" type="checkbox"> Rādīt angļu oriģinālu zem tulkojuma</label>
       <label class="row"><input id="lightTheme" type="checkbox"> Balts fons, melni burti</label>
@@ -76,6 +90,10 @@
         <button type="button" id="clearText">Notīrīt ekrānu</button>
       </div>
       <p id="testResult" class="note"></p>
+      <div class="actions">
+        <button type="button" id="showDiag">Diagnostika</button>
+      </div>
+      <pre id="diag" class="diag" hidden></pre>
       <div class="actions">
         <button value="close" class="primary">Gatavs</button>
       </div>
