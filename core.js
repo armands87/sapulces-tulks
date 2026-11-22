@@ -43,6 +43,92 @@
     return body;
   }
 
+  /*
+   * Live captions: the speech is translated in short fragments (clauses), each
+   * appended to the screen and never rewritten. Tiny prompt for low latency.
+   */
+  var CHUNK_PROMPT =
+    'You are a simultaneous interpreter, English to Latvian, at a business meeting. ' +
+    'You get the next fragment of live speech recognition (no punctuation, may have errors) ' +
+    'and the Latvian you have already said. Output ONLY the Latvian for the new fragment, ' +
+    'continuing your Latvian naturally: no repetition of earlier text, no quotes, no comments. ' +
+    'Lowercase unless a new sentence starts. Keep names, companies, products, numbers and ' +
+    'technical terms. Fix obvious recognition errors. Never use em dashes.';
+
+  function buildChunkMessages(fragment, prevEn, prevLv, endsSentence) {
+    var user = '';
+    if (prevEn) user += 'Earlier English: ' + prevEn + '\n';
+    if (prevLv) user += 'Your Latvian so far: ' + prevLv + '\n';
+    user += 'New fragment' + (endsSentence ? ' (ends the sentence)' : '') + ': ' + fragment;
+    return [
+      { role: 'system', content: CHUNK_PROMPT },
+      { role: 'user', content: user }
+    ];
+  }
+
+  function buildChunkBody(model, fragment, prevEn, prevLv, endsSentence) {
+    var body = {
+      model: model,
+      messages: buildChunkMessages(fragment, tail(prevEn, 160), tail(prevLv, 160), endsSentence),
+      stream: true,
+      max_completion_tokens: 120
+    };
+    if (/^(gpt-5|o\d)/i.test(model)) body.reasoning_effort = 'minimal';
+    else body.temperature = 0.2;
+    return body;
+  }
+
+  /* Last ~n characters, cut at a word boundary. */
+  function tail(s, n) {
+    s = (s || '').trim();
+    if (s.length <= n) return s;
+    var t = s.slice(-n);
+    var sp = t.indexOf(' ');
+    return sp >= 0 ? t.slice(sp + 1) : t;
+  }
+
+  /* Chunk size presets: minWords before a commit, words held back (recognizer may still
+   * change the newest words), pause that commits everything, hard maximum. */
+  var CHUNK_PRESETS = {
+    short:    { minWords: 4, holdBack: 1, pauseMs: 600, maxWords: 8 },
+    medium:   { minWords: 7, holdBack: 2, pauseMs: 700, maxWords: 12 },
+    sentence: { minWords: 1e9, holdBack: 0, pauseMs: 900, maxWords: 1e9 }
+  };
+
+  var BOUNDARY = { and: 1, but: 1, so: 1, because: 1, which: 1, that: 1, then: 1, or: 1, when: 1,
+    if: 1, while: 1, where: 1, who: 1, although: 1, since: 1, unless: 1, until: 1, after: 1, before: 1 };
+
+  /*
+   * Decide how many new words to commit (translate) now.
+   * words: current utterance words; committed: already translated count.
+   * event: 'interim' | 'pause' | 'final'. Returns a count (0 = wait).
+   */
+  function planChunk(words, committed, event, p) {
+    var remaining = words.length - committed;
+    if (remaining <= 0) return 0;
+    if (event === 'final' || event === 'pause') return remaining;
+    var avail = remaining - p.holdBack;
+    if (avail >= p.maxWords) return cutAtBoundary(words, committed, avail, p) || avail;
+    if (avail < p.minWords) return 0;
+    return cutAtBoundary(words, committed, avail, p) || avail;
+  }
+
+  /* Prefer to end a chunk right before a conjunction ("... the budget | and then ..."). */
+  function cutAtBoundary(words, committed, avail, p) {
+    for (var n = avail; n >= Math.min(3, p.minWords); n--) {
+      var next = (words[committed + n] || '').toLowerCase().replace(/[^a-z']/g, '');
+      if (BOUNDARY[next]) return n;
+    }
+    return 0;
+  }
+
+  function median(arr) {
+    if (!arr.length) return 0;
+    var a = arr.slice().sort(function (x, y) { return x - y; });
+    var m = a.length >> 1;
+    return a.length % 2 ? a[m] : Math.round((a[m - 1] + a[m]) / 2);
+  }
+
   /* Incremental SSE parser. Feed text chunks, get content deltas back. */
   function SSEParser() {
     this.buf = '';
@@ -184,6 +270,13 @@
   }
 
   root.TCore = {
+    CHUNK_PROMPT: CHUNK_PROMPT,
+    CHUNK_PRESETS: CHUNK_PRESETS,
+    buildChunkMessages: buildChunkMessages,
+    buildChunkBody: buildChunkBody,
+    planChunk: planChunk,
+    tail: tail,
+    median: median,
     classifyError: classifyError,
     retryDelay: retryDelay,
     lineStyles: lineStyles,

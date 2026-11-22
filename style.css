@@ -1,19 +1,29 @@
 :root {
   --bg: #000;
-  --fg: #fff;
+  --fg: #f2f2f2;          /* not pure white: less glare on a dark phone screen */
   --dim: #8a8a8a;
   --bar: #111;
   --btn: #222;
   --accent: #2e7d32;
   --stop: #b71c1c;
-  --size: 44px;
+  --live-fg: #ffd166;     /* calm amber for the words being spoken now */
+  --live-bg: transparent;
+  --hl-fg: #ffd60a;       /* history mode: whole current sentence */
+  --hl-bg: transparent;
+  --size: 40px;
+  --lh: 1.32;
+  --caplines: 5;
 }
 body.light {
   --bg: #fff;
-  --fg: #000;
+  --fg: #111;
   --dim: #6b6b6b;
   --bar: #f0f0f0;
   --btn: #e2e2e2;
+  --live-fg: #000;
+  --live-bg: #ffe680;     /* yellow marker on white */
+  --hl-fg: #000;
+  --hl-bg: #ffe94d;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
@@ -32,24 +42,24 @@ button {
   background: var(--btn);
   border: 0;
   border-radius: 10px;
-  padding: 8px 12px;
+  padding: 8px 10px;
   min-width: 44px;
   min-height: 44px;
   cursor: pointer;
 }
+
+/* ---------- Top bar ---------- */
 #bar {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: calc(env(safe-area-inset-top) + 6px) 10px 6px;
   background: var(--bar);
-  opacity: .85;
   flex-wrap: wrap;
 }
-body.running #bar { opacity: .45; }
-body.running #bar:active, body.running #bar:focus-within { opacity: .9; }
-.tools { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
-#size { width: 90px; }
+body.running #bar { opacity: .5; }
+body.running #bar:active, body.running #bar:focus-within { opacity: .95; }
+.tools { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 #toggleEn.on { outline: 2px solid var(--fg); }
 .status { font-size: 15px; padding: 4px 10px; border-radius: 20px; background: var(--btn); white-space: nowrap; }
 .status::before { content: "●"; margin-right: 6px; }
@@ -57,48 +67,128 @@ body.running #bar:active, body.running #bar:focus-within { opacity: .9; }
 .status.on::before { color: #4caf50; }
 .status.warn::before { color: #ffb300; }
 .status.err::before { color: #f44336; }
+.status.sound::before { animation: pulse .8s ease-in-out infinite alternate; }
+@keyframes pulse { from { opacity: 1; } to { opacity: .2; } }
 
+.error-bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: #ffb300; color: #000;
+  font-size: 18px; font-weight: 600;
+}
+.error-bar.fatal { background: #d32f2f; color: #fff; }
+.error-bar span { flex: 1; }
+.error-bar button { background: rgba(0,0,0,.15); color: inherit; min-height: 36px; }
+.error-bar[hidden] { display: none; }
+
+/* ---------- Text area (shared) ---------- */
 #feed {
   flex: 1;
-  overflow-y: auto;
-  padding: 16px 18px 24px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  padding: 12px 18px;
   font-size: var(--size);
-  line-height: 1.22;
-  scrollbar-width: none;
+  line-height: var(--lh);
 }
-#feed::-webkit-scrollbar { display: none; }
-#feed::before { content: ""; flex: 1 0 0; } /* pushes lines to the bottom, still scrollable */
-.hint { font-size: 22px; color: var(--dim); text-align: center; margin: auto 0; }
-.line { margin: 0 0 .45em; transition: opacity .6s; }
-.line .lv { font-weight: 600; overflow-wrap: anywhere; }
-.line .en { display: none; font-size: max(15px, .36em); color: var(--dim); margin-top: .15em; font-weight: 400; }
-body.show-en .line .en { display: block; }
-.line.interim .lv { opacity: .75; }
-.line.interim .lv:empty::before,
-.line.waiting .lv:empty::before { content: "…"; color: var(--dim); }
-.line.error .lv { color: #f44336; font-size: .5em; }
+.hint { font-size: 22px; line-height: 1.4; color: var(--dim); text-align: center; margin: auto 0; }
+body.started .hint { display: none; }
+.lv { font-weight: 600; overflow-wrap: anywhere; }
+.chunk { transition: color .9s ease, background-color .9s ease; }
+.chunk.failed { color: var(--dim); font-style: italic; font-weight: 400; }
+.caret {
+  display: none;
+  width: .14em; height: .85em;
+  margin-left: .12em;
+  vertical-align: -.08em;
+  background: var(--live-fg);
+  border-radius: 2px;
+  animation: blink 1.1s steps(2, start) infinite;
+}
+body.light .caret { background: #b8860b; }
+body.running .caret { display: inline-block; }
+@keyframes blink { to { visibility: hidden; } }
+.seg .en { display: none; }
+.pbreak { display: none; }
 
-footer { padding: 10px 14px calc(env(safe-area-inset-bottom) + 12px); background: var(--bg); }
-.big {
-  width: 100%;
-  min-height: 72px;
-  font-size: 28px;
-  font-weight: 700;
-  border-radius: 16px;
-  color: #fff;
+/* ---------- Mode 1: captions (default) ----------
+ * Fixed window of N lines in the middle of the screen. Text only ever grows at the end,
+ * so earlier lines never re-flow. The newest line is always at the same height.
+ * Older lines scroll up and fade out through the top mask. */
+body.mode-captions #feed { justify-content: center; }
+body.mode-captions #cap {
+  position: relative;
+  height: calc(var(--size) * var(--lh) * var(--caplines));
+  overflow: hidden;
+  flex: none;
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.18) 0, rgba(0,0,0,.6) calc(var(--size) * var(--lh) * .9), #000 calc(var(--size) * var(--lh) * 1.6));
+          mask-image: linear-gradient(to bottom, rgba(0,0,0,.18) 0, rgba(0,0,0,.6) calc(var(--size) * var(--lh) * .9), #000 calc(var(--size) * var(--lh) * 1.6));
 }
+body.mode-captions #capText {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  will-change: transform;
+}
+body.mode-captions .seg, body.mode-captions .seg .lv { display: inline; }
+body.mode-captions .pbreak { display: block; height: .3em; }
+body.mode-captions .chunk.live {
+  color: var(--live-fg);
+  background: var(--live-bg);
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  border-radius: .1em;
+}
+#liveEn {
+  display: none;
+  margin-top: 14px;
+  font-size: 16px;
+  line-height: 1.3;
+  color: var(--dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;           /* keep the newest words visible, cut the start */
+  text-align: left;
+}
+body.mode-captions.show-en #liveEn { display: block; }
+
+/* ---------- Mode 2: focus (only the current sentence) ---------- */
+body.mode-focus #feed, body.mode-history #feed { overflow-y: auto; scrollbar-width: none; }
+body.mode-focus #feed::-webkit-scrollbar, body.mode-history #feed::-webkit-scrollbar { display: none; }
+body.mode-focus #feed::before, body.mode-history #feed::before { content: ""; flex: 1 0 0; }
+body.mode-focus #feed::after { content: ""; flex: 1 0 0; }
+body.mode-focus .seg, body.mode-history .seg { display: block; margin: 0 0 .45em; }
+body.mode-focus.show-en .seg .en, body.mode-history.show-en .seg .en {
+  display: block; font-size: max(15px, .36em); color: var(--dim); font-weight: 400; margin-top: .15em;
+}
+body.mode-focus .seg.prev { font-size: .42em; opacity: .45; margin-bottom: .6em; }
+body.mode-focus .seg.current .chunk.live { color: var(--live-fg); background: var(--live-bg); }
+
+/* ---------- Mode 3: history, current sentence in yellow ---------- */
+body.mode-history .seg.current .lv {
+  color: var(--hl-fg);
+  background: var(--hl-bg);
+  -webkit-box-decoration-break: clone; box-decoration-break: clone;
+  padding: 0 .12em;
+  border-radius: .12em;
+}
+body.mode-history .seg { transition: opacity .6s; }
+
+/* ---------- Footer ---------- */
+footer {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 14px calc(env(safe-area-inset-bottom) + 12px);
+  background: var(--bg);
+}
+footer .status { flex: none; }
+.big { flex: 1; min-width: 0; min-height: 72px; font-size: 28px; font-weight: 700; border-radius: 16px; color: #fff; }
 .big.start { background: var(--accent); }
 .big.stop { background: var(--stop); }
 body.running footer { padding-top: 4px; }
-body.running .big { min-height: 52px; font-size: 22px; opacity: .7; }
+body.running .big { min-height: 48px; font-size: 20px; opacity: .55; }
 
+/* ---------- Settings ---------- */
 dialog {
-  background: var(--bar);
-  color: var(--fg);
-  border: 0;
-  border-radius: 16px;
+  background: var(--bar); color: var(--fg);
+  border: 0; border-radius: 16px;
   width: min(560px, calc(100vw - 24px));
   max-height: calc(100vh - 24px);
   padding: 0;
@@ -109,68 +199,14 @@ dialog h2 { margin: 0 0 4px; }
 dialog label { display: flex; flex-direction: column; gap: 6px; }
 dialog label.row { flex-direction: row; align-items: center; gap: 10px; }
 dialog input[type=password], dialog input[list], dialog select {
-  font: inherit;
-  padding: 10px;
-  border-radius: 10px;
-  border: 1px solid var(--dim);
-  background: var(--bg);
-  color: var(--fg);
+  font: inherit; padding: 10px; border-radius: 10px;
+  border: 1px solid var(--dim); background: var(--bg); color: var(--fg);
 }
 dialog input[type=checkbox] { width: 24px; height: 24px; flex: none; }
-.note { margin: 0; font-size: 14px; color: var(--dim); }
+.note { margin: 0; font-size: 14px; color: var(--dim); white-space: pre-wrap; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .actions .primary { background: var(--accent); color: #fff; margin-left: auto; }
-
-/* ---------- Modes ---------- */
-:root { --hl-fg: #ffd60a; --hl-bg: transparent; }
-body.light { --hl-fg: #000; --hl-bg: #ffe94d; }
-
-/* A: only the current sentence, previous one small and dim above it */
-body.mode-focus .line.prev { font-size: .42em; margin-bottom: .6em; }
-body.mode-focus .line.prev .lv { font-weight: 500; }
-body.mode-focus .line.current .lv { opacity: 1; }
-body.mode-focus .line { transition: none; }
-
-/* B: full history, live sentence in yellow (yellow marker on white theme) */
-body.mode-history .line.current .lv {
-  color: var(--hl-fg);
-  background: var(--hl-bg);
-  display: inline;
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
-  padding: 0 .12em;
-  border-radius: .12em;
-  opacity: 1;
-}
-body.mode-history .line.current .en { margin-top: .3em; }
-
-/* ---------- Error bar and status ---------- */
-.error-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  background: #ffb300;
-  color: #000;
-  font-size: 18px;
-  font-weight: 600;
-}
-.error-bar.fatal { background: #d32f2f; color: #fff; }
-.error-bar span { flex: 1; }
-.error-bar button { background: rgba(0,0,0,.15); color: inherit; min-height: 36px; }
-.error-bar[hidden] { display: none; }
-.status.sound::before { animation: pulse .8s ease-in-out infinite alternate; }
-@keyframes pulse { from { opacity: 1; } to { opacity: .2; } }
 .diag {
-  font-size: 12px;
-  max-height: 40vh;
-  overflow: auto;
-  white-space: pre-wrap;
-  background: var(--bg);
-  color: var(--fg);
-  padding: 8px;
-  border-radius: 8px;
-  margin: 0;
+  font-size: 12px; max-height: 40vh; overflow: auto; white-space: pre-wrap;
+  background: var(--bg); color: var(--fg); padding: 8px; border-radius: 8px; margin: 0;
 }
-/* focus mode: keep the sentence in the vertical middle of the screen */
-body.mode-focus #feed::after { content: ""; flex: 1 0 0; }

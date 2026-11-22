@@ -9,19 +9,17 @@
   <link rel="manifest" href="manifest.json">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://api.openai.com" crossorigin>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="mode-captions">
   <header id="bar">
-    <span id="status" class="status off" aria-live="polite">Gaida</span>
     <div class="tools">
       <button id="smaller" aria-label="Mazāks teksts">A−</button>
-      <input id="size" type="range" min="20" max="110" step="2" aria-label="Teksta izmērs">
       <button id="bigger" aria-label="Lielāks teksts">A+</button>
-      <button id="toggleMode" aria-label="Režīms">1</button>
+      <button id="toggleMode" aria-label="Režīms">CC</button>
       <button id="toggleEn" aria-label="Rādīt angļu tekstu">EN</button>
       <button id="toggleTheme" aria-label="Mainīt fonu">◐</button>
-      <button id="fullscreen" aria-label="Pilnekrāns">⛶</button>
       <button id="openSettings" aria-label="Iestatījumi">⚙</button>
     </div>
   </header>
@@ -31,17 +29,40 @@
     <button id="errorClose" aria-label="Aizvērt kļūdas ziņu">×</button>
   </div>
 
-  <main id="feed" aria-live="polite">
+  <main id="feed">
     <p id="hint" class="hint">Nospied <b>Sākt</b> un novieto telefonu pie skaļruņa.<br>Pirmajā reizē atver ⚙ un ielīmē OpenAI atslēgu.</p>
+    <div id="cap"><div id="capText" aria-live="polite"><span id="caret" class="caret" aria-hidden="true"></span></div></div>
+    <div id="liveEn" aria-hidden="true"></div>
   </main>
 
   <footer>
+    <span id="status" class="status off" aria-live="polite">Gaida</span>
     <button id="startStop" class="big start">Sākt</button>
   </footer>
 
   <dialog id="settings">
     <form method="dialog" id="settingsForm">
       <h2>Iestatījumi</h2>
+
+      <label>Rādīšanas režīms
+        <select id="mode">
+          <option value="captions">Subtitri: nepārtraukts teksts, jaunākais izcelts (ieteicams)</option>
+          <option value="focus">Tikai pašreizējais teikums</option>
+          <option value="history">Visa vēsture, pašreizējais dzeltenā</option>
+        </select>
+      </label>
+
+      <label>Subtitru rindu skaits: <span id="capLinesVal"></span>
+        <input id="capLines" type="range" min="2" max="6" step="1">
+      </label>
+
+      <label>Tulkošanas solis
+        <select id="chunk">
+          <option value="short">Īsas frāzes, ~4 vārdi (ātrākais)</option>
+          <option value="medium">Garākas frāzes, ~7 vārdi (nedaudz labāka valoda)</option>
+          <option value="sentence">Pa teikumiem (lēnākais, labākā valoda)</option>
+        </select>
+      </label>
 
       <label>Tulkošanas veids
         <select id="engine">
@@ -60,41 +81,32 @@
         <input id="model" list="models" spellcheck="false">
         <datalist id="models">
           <option value="gpt-4.1-mini">
-          <option value="gpt-4o-mini">
           <option value="gpt-4.1-nano">
+          <option value="gpt-4o-mini">
           <option value="gpt-5-nano">
           <option value="gpt-5-mini">
         </datalist>
       </label>
-      <p class="note">Ieteicams gpt-4.1-mini (ātrs, labs latviešu valodā). Lētāk: gpt-4o-mini.</p>
+      <p class="note">Nospied "Ātruma tests": tas izmēra katra modeļa atbildes laiku tieši tavā telefonā un tīklā.</p>
 
-      <label>Rādīšanas režīms
-        <select id="mode">
-          <option value="focus">Tikai pašreizējais teikums (iepriekšējais mazs virs tā)</option>
-          <option value="history">Visa vēsture, pašreizējais izcelts dzeltenā</option>
-        </select>
-      </label>
-      <p class="note">Ātri pārslēgt: poga 1 / ≡ augšējā joslā.</p>
-
-      <label class="row"><input id="interim" type="checkbox"> Ātrais režīms: tulkot jau runas laikā (zemāka aizture, ~2x dārgāk)</label>
-      <label class="row"><input id="showEn" type="checkbox"> Rādīt angļu oriģinālu zem tulkojuma</label>
+      <label class="row"><input id="showEn" type="checkbox"> Rādīt angļu oriģinālu (bāla rindiņa)</label>
       <label class="row"><input id="lightTheme" type="checkbox"> Balts fons, melni burti</label>
 
-      <label>Redzamo teikumu skaits: <span id="linesVal"></span>
+      <label>Vēstures režīmā redzamo teikumu skaits: <span id="linesVal"></span>
         <input id="lines" type="range" min="3" max="12" step="1">
       </label>
 
       <div class="actions">
         <button type="button" id="testKey">Pārbaudīt</button>
-        <button type="button" id="saveText">Saglabāt stenogrammu</button>
-        <button type="button" id="clearText">Notīrīt ekrānu</button>
-      </div>
-      <p id="testResult" class="note"></p>
-      <div class="actions">
+        <button type="button" id="speedTest">Ātruma tests</button>
         <button type="button" id="showDiag">Diagnostika</button>
       </div>
+      <p id="testResult" class="note"></p>
       <pre id="diag" class="diag" hidden></pre>
       <div class="actions">
+        <button type="button" id="saveText">Saglabāt stenogrammu</button>
+        <button type="button" id="clearText">Notīrīt ekrānu</button>
+        <button type="button" id="fullscreen">Pilnekrāns</button>
         <button value="close" class="primary">Gatavs</button>
       </div>
     </form>

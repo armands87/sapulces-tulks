@@ -1,56 +1,87 @@
-/* Sapulces tulks: live EN -> LV translation. Plain JS, no build step. */
+/* Sapulces tulks v3: live EN -> LV captions. Plain JS, no build step.
+ *
+ * Pipeline: Chrome speech recognition (interim words) -> chunker commits short
+ * stable fragments (~4 words, or at a pause) -> each fragment is translated at once
+ * (parallel requests, streamed) -> appended to the screen in order, never rewritten.
+ */
 (function () {
   'use strict';
   var C = window.TCore;
   var $ = function (id) { return document.getElementById(id); };
 
   /* ---------- Settings (localStorage only) ---------- */
+  var SETTINGS_VERSION = 3;
   var DEFAULTS = {
-    apiKey: '', model: 'gpt-4.1-mini', engine: 'openai', interim: true,
-    showEn: false, light: false, size: 44, lines: 7, mode: 'focus'
+    v: SETTINGS_VERSION, apiKey: '', model: 'gpt-4.1-mini', engine: 'openai',
+    showEn: false, light: false, size: 40, lines: 7, capLines: 5,
+    mode: 'captions', chunk: 'short'
   };
   var S = load();
   function load() {
     var s = {};
     try { s = JSON.parse(localStorage.getItem('tulks.settings') || '{}'); } catch (e) {}
+    if (s.v !== SETTINGS_VERSION) { // v3 introduced captions: switch older installs to it once
+      delete s.mode; delete s.interim;
+      if (s.size && s.size > 48) delete s.size;
+    }
     var out = {};
     for (var k in DEFAULTS) out[k] = (k in s) ? s[k] : DEFAULTS[k];
+    out.v = SETTINGS_VERSION;
     return out;
   }
   function save() {
     try { localStorage.setItem('tulks.settings', JSON.stringify(S)); } catch (e) {}
   }
+  function preset() { return C.CHUNK_PRESETS[S.chunk] || C.CHUNK_PRESETS.short; }
 
-  /* ---------- Diagnostics log (shown in settings) ---------- */
+  /* ---------- Diagnostics ---------- */
   var diag = [];
   function log(msg) {
-    var t = new Date().toTimeString().slice(0, 8);
-    diag.push(t + ' ' + msg);
-    if (diag.length > 60) diag.shift();
+    diag.push(new Date().toTimeString().slice(0, 8) + ' ' + msg);
+    if (diag.length > 80) diag.shift();
+  }
+  var lat = []; // {wait, api, total} per chunk, ms
+  function recordLatency(c) {
+    var x = { wait: c.commitAt - c.seenAvg, api: c.firstAt - c.commitAt, total: c.firstAt - c.seenAvg };
+    lat.push(x);
+    if (lat.length > 200) lat.shift();
+    updateStatus();
+  }
+  function latencySummary(n) {
+    var a = lat.slice(-(n || 30));
+    if (!a.length) return null;
+    return {
+      n: a.length,
+      total: C.median(a.map(function (x) { return x.total; })),
+      wait: C.median(a.map(function (x) { return x.wait; })),
+      api: C.median(a.map(function (x) { return x.api; }))
+    };
   }
 
   /* ---------- Elements ---------- */
-  var feed = $('feed'), statusEl = $('status'), btn = $('startStop'), dlg = $('settings');
+  var feed = $('feed'), capText = $('capText'), caret = $('caret'), liveEn = $('liveEn');
+  var statusEl = $('status'), btn = $('startStop'), dlg = $('settings');
   var errorBar = $('errorBar'), errorText = $('errorText');
+  var MODES = ['captions', 'focus', 'history'];
+  var MODE_LABEL = { captions: 'CC', focus: '1', history: '≡' };
 
   function applyView() {
-    document.documentElement.style.setProperty('--size', S.size + 'px');
-    $('size').value = S.size;
-    document.body.classList.toggle('light', !!S.light);
-    document.body.classList.toggle('show-en', !!S.showEn);
-    document.body.classList.toggle('mode-focus', S.mode === 'focus');
-    document.body.classList.toggle('mode-history', S.mode !== 'focus');
+    var root = document.documentElement.style;
+    root.setProperty('--size', S.size + 'px');
+    root.setProperty('--caplines', S.capLines);
+    var b = document.body.classList;
+    b.toggle('light', !!S.light);
+    b.toggle('show-en', !!S.showEn);
+    MODES.forEach(function (m) { b.toggle('mode-' + m, S.mode === m); });
     $('toggleEn').classList.toggle('on', !!S.showEn);
-    $('toggleMode').textContent = S.mode === 'focus' ? '1' : '≡';
-    $('toggleMode').setAttribute('aria-label', S.mode === 'focus'
-      ? 'Režīms: tikai pašreizējais teikums' : 'Režīms: visa vēsture');
+    $('toggleMode').textContent = MODE_LABEL[S.mode] || 'CC';
     document.querySelector('meta[name=theme-color]').content = S.light ? '#ffffff' : '#000000';
+    prevCapH = 0;
     layout();
   }
 
   /* ---------- Errors and status ---------- */
-  var lastError = null; // {msg, fatal, at}
-
+  var lastError = null;
   function showError(msg, fatal) {
     lastError = { msg: msg, fatal: !!fatal, at: Date.now() };
     errorText.textContent = msg;
@@ -67,31 +98,95 @@
   }
   $('errorClose').onclick = function () { lastError = null; errorBar.hidden = true; updateStatus(); };
 
-  /* ---------- Feed rendering ---------- */
-  var history = [];       // finished lines {en, lv, t}
-  var currentLine = null; // interim line element
+  /* ---------- Segments and chunks (the screen model) ----------
+   * seg  = one utterance (between recognizer finals), holds chunks.
+   * chunk = a translated fragment. Its text only ever grows while streaming. */
+  var segs = [];    // {el, lvEl, enEl, en, chunks: []}
+  var chunks = [];  // all chunks in spoken order
+  var lastSegEndAt = 0;
+  var liveIndex = -1;
 
-  function createLine() {
-    var hint = $('hint');
-    if (hint) hint.remove();
-    var el = document.createElement('div');
-    el.className = 'line interim';
-    el.innerHTML = '<div class="lv"></div><div class="en"></div>';
-    el._seq = 0;
-    feed.appendChild(el);
+  function newSeg() {
+    document.body.classList.add('started');
+    var prev = segs[segs.length - 1];
+    if (prev) {
+      if (Date.now() - lastSegEndAt > 2500) {
+        var br = document.createElement('span'); br.className = 'pbreak';
+        capText.appendChild(br);
+      } else {
+        capText.appendChild(document.createTextNode(' '));
+      }
+    }
+    var el = document.createElement('span');
+    el.className = 'seg';
+    el.innerHTML = '<span class="lv"></span><span class="en"></span>';
+    capText.appendChild(el);
+    var seg = { el: el, lvEl: el.firstChild, enEl: el.lastChild, en: '', chunks: [] };
+    seg.lvEl.appendChild(caret);
+    segs.push(seg);
+    trimDom();
     layout();
-    return el;
+    return seg;
+  }
+
+  function addChunk(seg, en, seenAvg, endsSentence) {
+    var span = document.createElement('span');
+    span.className = 'chunk';
+    if (seg.chunks.length) seg.lvEl.insertBefore(document.createTextNode(' '), caret.parentNode === seg.lvEl ? caret : null);
+    seg.lvEl.insertBefore(span, caret.parentNode === seg.lvEl ? caret : null);
+    var c = { el: span, en: en, lv: '', index: chunks.length, seg: seg, endsSentence: endsSentence,
+      seenAvg: seenAvg, commitAt: Date.now(), firstAt: 0, done: false };
+    chunks.push(c);
+    seg.chunks.push(c);
+    translateChunk(c, 0);
+    return c;
+  }
+
+  function setLive(c) {
+    if (c.index <= liveIndex) return;
+    var old = chunks[liveIndex];
+    if (old) old.el.classList.remove('live');
+    liveIndex = c.index;
+    c.el.classList.add('live');
+  }
+
+  function trimDom() {
+    var max = S.mode === 'history' ? S.lines + 20 : 40;
+    while (segs.length > max) {
+      var s = segs.shift();
+      while (capText.firstChild && capText.firstChild !== s.el) capText.removeChild(capText.firstChild);
+      capText.removeChild(s.el);
+    }
+  }
+
+  /* Smoothly scroll the caption window when a new line appears (no jump). */
+  var prevCapH = 0;
+  function smoothShift() {
+    if (S.mode !== 'captions') return;
+    var h = capText.offsetHeight;
+    if (prevCapH && h > prevCapH + 2) {
+      var d = h - prevCapH;
+      capText.style.transition = 'none';
+      capText.style.transform = 'translateY(' + d + 'px)';
+      void capText.offsetHeight;
+      capText.style.transition = 'transform 260ms cubic-bezier(.2,.7,.3,1)';
+      capText.style.transform = 'translateY(0)';
+    }
+    prevCapH = h;
   }
 
   function layout() {
-    var lines = feed.querySelectorAll('.line');
-    var keep = (S.mode === 'focus' ? 2 : S.lines) + 20;
-    var styles = C.lineStyles(S.mode, lines.length, S.lines);
-    for (var i = 0; i < lines.length; i++) {
-      var el = lines[i], st = styles[i];
-      if (lines.length - 1 - i >= keep) { el.remove(); continue; }
+    if (S.mode === 'captions') {
+      segs.forEach(function (s) { s.el.style.display = ''; s.el.style.opacity = ''; s.el.classList.remove('current', 'prev'); });
+      smoothShift();
+      return;
+    }
+    capText.style.transform = '';
+    var styles = C.lineStyles(S.mode, segs.length, S.lines);
+    for (var i = 0; i < segs.length; i++) {
+      var el = segs[i].el, st = styles[i];
       el.style.display = st.show ? '' : 'none';
-      el.style.opacity = st.show ? String(st.opacity) : '';
+      el.style.opacity = S.mode === 'history' && st.show ? String(st.opacity) : '';
       el.classList.toggle('current', st.role === 'current');
       el.classList.toggle('prev', st.role === 'prev');
     }
@@ -100,61 +195,39 @@
 
   /* ---------- Translation ---------- */
   var chromeTranslator = null;
-  var inflight = 0;
+  var inflight = 0, lastApiAt = 0;
 
   function hasKey() { return S.apiKey && S.apiKey.trim().length > 20; }
 
-  function makeErr(status, body, cancelled) {
-    var info = C.classifyError(status, body, S.model);
+  function makeErr(status, body, cancelled, model) {
+    var info = C.classifyError(status, body, model || S.model);
     var e = new Error(info.msg);
     e.status = status; e.info = info; e.cancelled = !!cancelled;
     return e;
   }
 
-  /*
-   * One translation request with: overall timeout, stall timeout (no stream
-   * chunk for stallMs), and cancel via external signal. Always settles.
-   */
-  function translate(text, context, onDelta, opts) {
-    opts = opts || {};
-    inflight++; updateStatus();
-    var p = S.engine === 'chrome' ? translateChrome(text, onDelta, opts) : translateOpenAI(text, context, onDelta, opts);
-    return p.then(function (r) { inflight--; updateStatus(); return r; },
-      function (e) { inflight--; updateStatus(); throw e; });
-  }
-
-  function translateOpenAI(text, context, onDelta, opts) {
+  /* Streamed chat completion with total + stall timeouts. Always settles. */
+  function openaiStream(body, onDelta, opts) {
     if (!hasKey()) return Promise.reject(makeErr(401, '{}'));
-    var ctrl = new AbortController();
-    var reason = '';
+    opts = opts || {};
+    var ctrl = new AbortController(), reason = '';
     function abort(why) { if (!reason) { reason = why; try { ctrl.abort(); } catch (e) {} } }
-    var total = setTimeout(function () { abort('timeout'); }, opts.timeoutMs || 15000);
+    var total = setTimeout(function () { abort('timeout'); }, opts.timeoutMs || 10000);
     var stall = null;
-    function armStall() {
-      clearTimeout(stall);
-      stall = setTimeout(function () { abort('stall'); }, opts.stallMs || 7000);
-    }
-    if (opts.signal) {
-      if (opts.signal.aborted) abort('cancel');
-      else opts.signal.addEventListener('abort', function () { abort('cancel'); });
-    }
-    armStall();
+    function armStall() { clearTimeout(stall); stall = setTimeout(function () { abort('stall'); }, opts.stallMs || 5000); }
     function done() { clearTimeout(total); clearTimeout(stall); }
-
+    armStall();
+    lastApiAt = Date.now();
+    inflight++; updateStatus();
     return fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.apiKey.trim() },
-      body: JSON.stringify(C.buildBody(S.model || DEFAULTS.model, text, context, true)),
+      body: JSON.stringify(body),
       signal: ctrl.signal
     }).then(function (res) {
-      if (!res.ok) {
-        return res.text().catch(function () { return ''; }).then(function (t) { throw makeErr(res.status, t); });
-      }
+      if (!res.ok) return res.text().catch(function () { return ''; }).then(function (t) { throw makeErr(res.status, t, false, body.model); });
       armStall();
-      var reader = res.body.getReader();
-      var dec = new TextDecoder();
-      var parser = new C.SSEParser();
-      var full = '';
+      var reader = res.body.getReader(), dec = new TextDecoder(), parser = new C.SSEParser(), full = '';
       function pump() {
         return reader.read().then(function (r) {
           if (r.done) return full;
@@ -167,124 +240,164 @@
       }
       return pump();
     }).then(function (full) {
-      done();
+      done(); inflight--; updateStatus();
       return full.trim();
     }, function (e) {
-      done();
-      if (e && e.info) throw e;                 // HTTP error already classified
-      if (reason === 'cancel') throw makeErr(0, '', true);
-      throw makeErr(0, '');                     // network, timeout or stall
+      done(); inflight--; updateStatus();
+      if (e && e.info) throw e;
+      throw makeErr(0, '', reason === 'cancel');
     });
   }
 
-  function translateChrome(text, onDelta, opts) {
+  function chromeTranslate(text) {
     var get = chromeTranslator ? Promise.resolve(chromeTranslator) :
-      self.Translator.create({ sourceLanguage: 'en', targetLanguage: 'lv' }).then(function (t) {
-        chromeTranslator = t; return t;
-      });
-    var work = get.then(function (t) { return t.translate(text); }).then(function (out) { onDelta(out); return out; });
-    var timeout = new Promise(function (_, rej) {
-      setTimeout(function () { rej(makeErr(0, '')); }, opts.timeoutMs || 15000);
-    });
-    return Promise.race([work, timeout]).catch(function (e) {
-      if (e && e.info) throw e;
+      self.Translator.create({ sourceLanguage: 'en', targetLanguage: 'lv' }).then(function (t) { chromeTranslator = t; return t; });
+    inflight++; updateStatus();
+    return get.then(function (t) { return t.translate(text); }).then(function (r) {
+      inflight--; updateStatus(); return r;
+    }, function (e) {
+      inflight--; updateStatus();
       var err = new Error('Chrome tulkotāja kļūda: ' + (e && e.message));
-      err.info = { msg: err.message, retry: false, fatal: false }; err.status = -1;
+      err.info = { msg: err.message, retry: false, fatal: false };
       throw err;
     });
   }
 
-  function contextFor() {
-    return history.slice(-3).map(function (h) { return h.en; });
+  /* Keep the TLS/HTTP2 connection to OpenAI warm: a cold connection adds 200-600 ms. */
+  function warm() {
+    if (S.engine !== 'openai' || !hasKey()) return;
+    lastApiAt = Date.now();
+    fetch('https://api.openai.com/v1/models/' + encodeURIComponent(S.model), {
+      headers: { 'Authorization': 'Bearer ' + S.apiKey.trim() }
+    }).then(function (r) {
+      log('warm ' + r.status);
+      if (r.status === 401) showError(C.classifyError(401, '', S.model).msg, true);
+      if (r.status === 404) showError(C.classifyError(404, '', S.model).msg, true);
+    }).catch(function () { log('warm failed'); });
   }
 
-  /* Interim translation: max one request at a time, throttled, never blocks finals. */
-  var interim = { busy: false, lastText: '', lastAt: 0, ctrl: null, timer: null, pendingText: '' };
-  var INTERIM_GAP = 1200;
-
-  function maybeTranslateInterim(line, text) {
-    interim.pendingText = text;
-    if (!S.interim || interim.busy) return;
-    if (lastError && lastError.fatal) return;
-    if (S.engine === 'openai' && !hasKey()) return;
-    var now = Date.now();
-    if (!C.shouldTranslateInterim(text, interim.lastText, interim.lastAt, now, INTERIM_GAP)) {
-      if (text !== interim.lastText) scheduleInterimCheck(line, Math.max(150, INTERIM_GAP - (now - interim.lastAt)));
-      return;
+  function contextBefore(c) {
+    var en = [], lv = [];
+    for (var i = Math.max(0, c.index - 4); i < c.index; i++) {
+      en.push(chunks[i].en);
+      if (chunks[i].lv) lv.push(chunks[i].lv);
     }
-    interim.busy = true;
-    interim.lastText = text;
-    interim.lastAt = now;
-    var seq = ++line._seq;
-    var ctrl = new AbortController();
-    interim.ctrl = ctrl;
-    translate(text, contextFor(), function (partial) {
-      if (line._seq === seq && line.classList.contains('interim')) {
-        line.querySelector('.lv').textContent = partial; layout();
-      }
-    }, { signal: ctrl.signal, timeoutMs: 6000, stallMs: 4000 }).then(function () {
-      clearError(true);
-    }, function (e) {
-      if (!e.cancelled && e.info && e.info.fatal) showError(e.info.msg, true);
-      // non-fatal interim errors are ignored: the final translation will retry
-    }).then(function () {
-      if (interim.ctrl !== ctrl) return; // line was closed meanwhile
-      interim.busy = false; interim.ctrl = null;
-      // speech kept coming while we were busy: catch up
-      if (currentLine === line && interim.pendingText && interim.pendingText !== interim.lastText) {
-        scheduleInterimCheck(line, 50);
-      }
-    });
+    return { en: en.join(' '), lv: lv.join(' ') };
   }
 
-  function scheduleInterimCheck(line, ms) {
-    clearTimeout(interim.timer);
-    interim.timer = setTimeout(function () {
-      if (currentLine === line && interim.pendingText) maybeTranslateInterim(line, interim.pendingText);
-    }, ms);
+  /* Display-only capitalization: first chunk ever, or the previous chunk ended a sentence. */
+  function startsSentence(c) {
+    var prev = chunks[c.index - 1];
+    return !prev || /[.!?]["')]*\s*$/.test(prev.lv || '');
   }
 
-  function translateFinal(line, text, entry, attempt) {
-    attempt = attempt || 0;
-    if (!entry) {
-      entry = { en: text, lv: '', t: new Date() };
-      history.push(entry);
-    }
-    var ctx = contextFor().filter(function (s) { return s !== text; });
-    line.classList.add('waiting');
-    line.classList.remove('error');
-    var seq = ++line._seq;
-    var lvEl = line.querySelector('.lv');
-    var hadInterim = attempt === 0 ? lvEl.textContent : '';
-    var first = true;
-    translate(text, ctx, function (partial) {
-      if (line._seq !== seq) return;
-      // keep the interim text until the final stream has caught up a bit, avoids flicker
-      if (first && hadInterim && partial.length < Math.min(hadInterim.length, 12)) return;
-      first = false;
-      lvEl.textContent = partial; layout();
-    }, { timeoutMs: 15000, stallMs: 7000 }).then(function (full) {
-      entry.lv = full;
-      if (line._seq === seq) lvEl.textContent = full || lvEl.textContent;
-      line.classList.remove('waiting');
+  function translateChunk(c, attempt) {
+    var ctx = contextBefore(c);
+    var onDelta = function (partial) {
+      if (!c.firstAt) { c.firstAt = Date.now(); if (attempt === 0) recordLatency(c); }
+      if (startsSentence(c)) partial = partial.charAt(0).toUpperCase() + partial.slice(1);
+      c.lv = partial;
+      c.el.textContent = partial;
+      setLive(c);
+      layout();
+    };
+    var p = S.engine === 'chrome'
+      ? chromeTranslate(c.en).then(function (t) { onDelta(t); return t; })
+      : openaiStream(C.buildChunkBody(S.model || DEFAULTS.model, c.en, ctx.en, ctx.lv, c.endsSentence), onDelta,
+        { timeoutMs: 10000, stallMs: 5000 });
+    p.then(function (full) {
+      c.done = true;
+      c.lv = full || c.lv;
+      c.el.textContent = c.lv;
+      if (!c.lv) { c.el.textContent = c.en; c.el.classList.add('failed'); }
       clearError(false);
       layout();
     }, function (e) {
       var info = e.info || { msg: String(e.message || e), retry: false, fatal: false };
-      log('final fail #' + attempt + ' status=' + e.status + ' ' + info.msg);
-      if (info.retry && attempt < 3) {
+      log('chunk #' + c.index + ' fail ' + attempt + ' status=' + e.status);
+      if (info.retry && attempt < 2) {
         showError(info.msg, false);
-        setTimeout(function () { translateFinal(line, text, entry, attempt + 1); }, C.retryDelay(attempt));
+        c.firstAt = 0;
+        setTimeout(function () { translateChunk(c, attempt + 1); }, C.retryDelay(attempt) / 2);
         return;
       }
-      line.classList.remove('waiting');
       showError(info.msg, info.fatal);
-      if (!lvEl.textContent) { lvEl.textContent = '[nav iztulkots]'; line.classList.add('error'); }
+      if (!c.lv) { c.el.textContent = c.en; c.el.classList.add('failed'); } // English beats nothing
       layout();
     });
   }
 
-  /* ---------- Speech recognition ---------- */
+  /* ---------- Chunker: turns recognizer words into fragments ---------- */
+  var utter = null; // {seg, words, committed, seenAt, lastChangeAt, text}
+  var pauseTimer = null;
+
+  function ensureUtter() {
+    if (!utter) utter = { seg: newSeg(), words: [], committed: 0, seenAt: [], lastChangeAt: Date.now(), text: '' };
+    return utter;
+  }
+
+  function setWords(text) {
+    var u = ensureUtter(), now = Date.now();
+    var words = text.trim().split(/\s+/).filter(Boolean);
+    for (var i = 0; i < words.length; i++) if (u.seenAt[i] == null) u.seenAt[i] = now;
+    if (text !== u.text) { u.text = text; u.lastChangeAt = now; }
+    u.words = words;
+    u.seg.en = words.join(' ');
+    u.seg.enEl.textContent = u.seg.en;
+    liveEn.textContent = C.tail(u.seg.en, 90);
+  }
+
+  function runChunker(event) {
+    var u = utter;
+    if (!u) return;
+    var p = preset();
+    for (var guard = 0; guard < 10; guard++) {
+      var n = C.planChunk(u.words, u.committed, event, p);
+      if (!n) break;
+      var from = u.committed, to = from + n;
+      var seen = u.seenAt.slice(from, to).filter(function (x) { return x != null; });
+      var seenAvg = seen.length ? seen.reduce(function (a, b) { return a + b; }, 0) / seen.length : Date.now();
+      u.committed = to;
+      addChunk(u.seg, u.words.slice(from, to).join(' '), seenAvg, event === 'final' && to >= u.words.length);
+      if (event !== 'interim') break;
+    }
+  }
+
+  function onInterimText(text) {
+    setWords(text);
+    runChunker('interim');
+    clearTimeout(pauseTimer);
+    var p = preset();
+    pauseTimer = setTimeout(function () {
+      if (utter && Date.now() - utter.lastChangeAt >= p.pauseMs - 20) runChunker('pause');
+    }, p.pauseMs);
+  }
+
+  function onFinalText(text) {
+    setWords(text);
+    runChunker('final');
+    endUtter();
+  }
+
+  function endUtter() {
+    clearTimeout(pauseTimer);
+    if (utter) {
+      runChunker('final');
+      if (!utter.seg.chunks.length && !utter.words.length) {
+        // empty segment: remove it and its separator
+        var el = utter.seg.el;
+        if (el.previousSibling && el.previousSibling !== caret) capText.removeChild(el.previousSibling);
+        capText.removeChild(el);
+        segs.pop();
+        var last = segs[segs.length - 1];
+        if (last) last.lvEl.appendChild(caret);
+      }
+      lastSegEndAt = Date.now();
+    }
+    utter = null;
+  }
+
+  /* ---------- Speech recognition (hardened in v2) ---------- */
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   var rec = null, gen = 0, running = false;
   var active = false, starting = false, startCalledAt = 0;
@@ -330,7 +443,6 @@
       }
       if (ev.error === 'network') showError('Runas atpazīšanai nav interneta, mēģina vēlreiz', false);
       else if (ev.error === 'audio-capture') showError('Mikrofons nav pieejams (vai to izmanto cita lietotne)', false);
-      // Normally onend follows. If it does not within 1.5 s, force a restart.
       setTimeout(function () {
         if (mine() && running && (active || starting)) { log('no onend after error, kick'); kick(); }
       }, 1500);
@@ -340,7 +452,7 @@
       active = false; starting = false;
       statusEl.classList.remove('sound');
       log('rec end');
-      if (currentLine) finalizeInterimLine();
+      endUtter();
       if (!running) { updateStatus(); return; }
       var short = Date.now() - sessionStart < 2000 && !gotResult;
       fails = short ? fails + 1 : 0;
@@ -349,14 +461,13 @@
     return r;
   }
 
-  /* Throw away the current recognizer (its late events are ignored) and restart. */
   function kick() {
     var old = rec;
     rec = null; gen++;
     active = false; starting = false;
     statusEl.classList.remove('sound');
     if (old) { try { old.abort(); } catch (e) {} }
-    if (currentLine) finalizeInterimLine();
+    endUtter();
     if (running) scheduleRestart(300);
   }
 
@@ -393,46 +504,14 @@
     for (var i = e.resultIndex; i < e.results.length; i++) {
       var r = e.results[i];
       var t = r[0] ? r[0].transcript : '';
-      if (r.isFinal) handleFinal(t);
-      else interimText += t;
+      if (r.isFinal) {
+        var part = C.newFinalPart(lastFinalRaw, t);
+        lastFinalRaw = t.trim();
+        if (part) onFinalText(part);
+      } else interimText += t;
     }
     interimText = C.newFinalPart(lastFinalRaw, interimText.trim());
-    if (interimText) handleInterim(interimText);
-  }
-
-  function handleInterim(text) {
-    if (!currentLine) currentLine = createLine();
-    currentLine.querySelector('.en').textContent = text;
-    currentLine._en = text;
-    layout();
-    maybeTranslateInterim(currentLine, text);
-  }
-
-  function handleFinal(raw) {
-    var part = C.newFinalPart(lastFinalRaw, raw);
-    lastFinalRaw = raw.trim();
-    if (!part) return;
-    var line = currentLine || createLine();
-    currentLine = null;
-    closeInterim(line);
-    line.querySelector('.en').textContent = part;
-    translateFinal(line, part);
-  }
-
-  function finalizeInterimLine() {
-    var line = currentLine, text = line._en;
-    currentLine = null;
-    closeInterim(line);
-    if (text) translateFinal(line, text); else line.remove();
-    layout();
-  }
-
-  function closeInterim(line) {
-    line.classList.remove('interim');
-    if (interim.ctrl) { try { interim.ctrl.abort(); } catch (e) {} }
-    interim.busy = false; interim.ctrl = null;
-    interim.lastText = ''; interim.lastAt = 0; interim.pendingText = '';
-    clearTimeout(interim.timer);
+    if (interimText) onInterimText(interimText);
   }
 
   function updateStatus() {
@@ -443,7 +522,8 @@
     else if (starting) { text = 'Ieslēdz mikrofonu…'; kind = 'warn'; }
     else if (!active) { text = 'Restartē…'; kind = 'warn'; }
     else {
-      text = 'Klausās' + (inflight > 0 ? ' · tulko' : '');
+      var l = latencySummary(10);
+      text = 'Klausās' + (l ? ' · ' + (l.total / 1000).toFixed(1).replace('.', ',') + ' s' : '');
       kind = lastError ? (lastError.fatal ? 'err' : 'warn') : 'on';
     }
     statusEl.textContent = text;
@@ -478,25 +558,19 @@
 
   /* ---------- Start / stop ---------- */
   function start() {
-    if (!SR) {
-      showError('Šajā pārlūkā nav runas atpazīšanas. Izmanto Chrome Android ierīcē.', true);
-      return;
-    }
+    if (!SR) { showError('Šajā pārlūkā nav runas atpazīšanas. Izmanto Chrome Android ierīcē.', true); return; }
     if (S.engine === 'openai' && !hasKey()) {
-      openSettings();
-      $('testResult').textContent = 'Vispirms ielīmē OpenAI API atslēgu.';
-      return;
+      openSettings(); $('testResult').textContent = 'Vispirms ielīmē OpenAI API atslēgu.'; return;
     }
     if (S.engine === 'chrome' && !('Translator' in self)) {
-      openSettings();
-      $('testResult').textContent = 'Chrome iebūvētais tulkotājs šajā ierīcē nav pieejams. Izvēlies OpenAI.';
-      return;
+      openSettings(); $('testResult').textContent = 'Chrome iebūvētais tulkotājs šajā ierīcē nav pieejams. Izvēlies OpenAI.'; return;
     }
     clearError(false);
     running = true; fails = 0; notAllowedCount = 0;
-    log('START');
-    document.body.classList.add('running');
+    log('START model=' + S.model + ' chunk=' + S.chunk + ' mode=' + S.mode);
+    document.body.classList.add('running', 'started');
     btn.textContent = 'Apturēt'; btn.className = 'big stop';
+    warm();
     lockScreen();
     startRec();
     clearInterval(watchdog);
@@ -509,6 +583,7 @@
       if (act === 'start') { log('watchdog: start'); startRec(); }
       else if (act === 'kick') { log('watchdog: kick'); lastEventAt = Date.now(); kick(); }
       if (running && !document.hidden && !wakeLock) lockScreen();
+      if (running && Date.now() - lastApiAt > 40000) warm();
       updateStatus();
     }, 3000);
   }
@@ -519,7 +594,6 @@
     clearTimeout(restartTimer); restartTimer = null;
     clearInterval(watchdog);
     if (rec) { try { rec.stop(); } catch (e) {} }
-    // if Chrome never sends onend, do not stay "active"
     setTimeout(function () { if (!running) { active = false; starting = false; updateStatus(); } }, 1500);
     unlockScreen();
     document.body.classList.remove('running');
@@ -533,10 +607,11 @@
   function setSize(v) { S.size = Math.max(20, Math.min(110, v)); save(); applyView(); }
   $('smaller').onclick = function () { setSize(S.size - 4); };
   $('bigger').onclick = function () { setSize(S.size + 4); };
-  $('size').oninput = function (e) { setSize(+e.target.value); };
   $('toggleEn').onclick = function () { S.showEn = !S.showEn; save(); applyView(); };
   $('toggleTheme').onclick = function () { S.light = !S.light; save(); applyView(); };
-  $('toggleMode').onclick = function () { S.mode = S.mode === 'focus' ? 'history' : 'focus'; save(); applyView(); };
+  $('toggleMode').onclick = function () {
+    S.mode = MODES[(MODES.indexOf(S.mode) + 1) % MODES.length]; save(); applyView();
+  };
   $('fullscreen').onclick = function () {
     if (document.fullscreenElement) document.exitFullscreen();
     else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(function () {});
@@ -548,10 +623,11 @@
     $('apiKey').value = S.apiKey;
     $('model').value = S.model;
     $('mode').value = S.mode;
-    $('interim').checked = !!S.interim;
+    $('chunk').value = S.chunk;
     $('showEn').checked = !!S.showEn;
     $('lightTheme').checked = !!S.light;
     $('lines').value = S.lines; $('linesVal').textContent = S.lines;
+    $('capLines').value = S.capLines; $('capLinesVal').textContent = S.capLines;
     $('testResult').textContent = '';
     $('diag').hidden = true;
     $('chromeNote').textContent = ('Translator' in self)
@@ -560,45 +636,94 @@
     if (dlg.showModal) dlg.showModal(); else dlg.setAttribute('open', '');
   }
   function readSettings() {
-    var keyChanged = S.apiKey !== $('apiKey').value.trim() || S.model !== ($('model').value.trim() || DEFAULTS.model);
+    var changed = S.apiKey !== $('apiKey').value.trim() || S.model !== ($('model').value.trim() || DEFAULTS.model);
     S.engine = $('engine').value;
     S.apiKey = $('apiKey').value.trim();
     S.model = $('model').value.trim() || DEFAULTS.model;
     S.mode = $('mode').value;
-    S.interim = $('interim').checked;
+    S.chunk = $('chunk').value;
     S.showEn = $('showEn').checked;
     S.light = $('lightTheme').checked;
     S.lines = +$('lines').value;
+    S.capLines = +$('capLines').value;
     chromeTranslator = null;
-    if (keyChanged) clearError(false); // give a fixed key/model a fresh chance
+    if (changed) { clearError(false); if (running) warm(); }
     save(); applyView();
   }
   $('openSettings').onclick = openSettings;
   $('lines').oninput = function (e) { $('linesVal').textContent = e.target.value; };
+  $('capLines').oninput = function (e) { $('capLinesVal').textContent = e.target.value; };
   dlg.addEventListener('close', readSettings);
+
+  var SAMPLE = 'so the main issue with the current supplier is';
   $('testKey').onclick = function () {
     readSettings();
     var out = $('testResult');
     out.textContent = 'Pārbauda…';
-    var t0 = Date.now();
-    translate('Good morning everyone, let us start with the quarterly numbers.', [], function (p) {
-      out.textContent = p;
-    }, { timeoutMs: 15000 }).then(function (full) {
-      out.textContent = 'Darbojas (' + ((Date.now() - t0) / 1000).toFixed(1) + ' s): ' + full;
+    var t0 = Date.now(), first = 0;
+    var p = S.engine === 'chrome' ? chromeTranslate(SAMPLE) :
+      openaiStream(C.buildChunkBody(S.model, SAMPLE, '', '', false), function (t) {
+        if (!first) first = Date.now(); out.textContent = t;
+      });
+    p.then(function (full) {
+      out.textContent = 'Darbojas. Pirmais vārds ' + ((first || Date.now()) - t0) + ' ms: ' + full;
       clearError(false);
     }).catch(function (e) { out.textContent = 'Kļūda: ' + e.message; });
   };
+
+  /* Measures time to first translated word for several models, on this phone and network. */
+  $('speedTest').onclick = function () {
+    readSettings();
+    var out = $('testResult');
+    if (S.engine !== 'openai' || !hasKey()) { out.textContent = 'Ātruma testam vajag OpenAI atslēgu.'; return; }
+    var models = ['gpt-4.1-nano', 'gpt-4.1-mini', 'gpt-4o-mini', 'gpt-5-nano'];
+    if (models.indexOf(S.model) < 0) models.unshift(S.model);
+    var lines = [];
+    out.textContent = 'Mēra (katram modelim 2 reizes)…';
+    var chain = Promise.resolve();
+    models.forEach(function (m) {
+      chain = chain.then(function () {
+        var times = [], text = '';
+        function once() {
+          var t0 = Date.now(), first = 0;
+          return openaiStream(C.buildChunkBody(m, SAMPLE, 'we looked at three offers last week', 'pagājušajā nedēļā apskatījām trīs piedāvājumus', false),
+            function () { if (!first) first = Date.now(); }, { timeoutMs: 15000, stallMs: 8000 })
+            .then(function (t) { times.push((first || Date.now()) - t0); text = t; });
+        }
+        return once().then(once).then(function () {
+          lines.push(m + ': ' + Math.min.apply(null, times) + ' ms  "' + text + '"');
+        }, function (e) {
+          lines.push(m + ': nav pieejams (' + e.message + ')');
+        }).then(function () { out.textContent = lines.join('\n') + '\n…'; });
+      });
+    });
+    chain.then(function () {
+      out.textContent = 'Laiks līdz pirmajam tulkotajam vārdam (labākais no 2):\n' + lines.join('\n') +
+        '\nIzvēlies ātrāko, kura tulkojums izskatās labi, un ieraksti to laukā Modelis.';
+      clearError(false);
+    });
+  };
+
   $('showDiag').onclick = function () {
-    var d = $('diag');
+    var d = $('diag'), l = latencySummary(30);
     d.hidden = !d.hidden;
-    d.textContent = 'running=' + running + ' active=' + active + ' starting=' + starting +
-      ' inflight=' + inflight + ' fails=' + fails + ' wakeLock=' + !!wakeLock + '\n' +
+    d.textContent =
+      (l ? 'Aizture (mediāna, pēdējie ' + l.n + ' gabali):\n' +
+        '  runa atpazīta → tulkojums uz ekrāna: ' + l.total + ' ms\n' +
+        '    no tā gaidīšana uz frāzi: ' + l.wait + ' ms\n' +
+        '    OpenAI līdz pirmajam vārdam: ' + l.api + ' ms\n' +
+        '  (+ Google runas atpazīšana, ap 300 līdz 700 ms, nav izmērāma)\n\n'
+        : 'Aizture: vēl nav datu\n\n') +
+      'running=' + running + ' active=' + active + ' starting=' + starting +
+      ' inflight=' + inflight + ' fails=' + fails + ' wakeLock=' + !!wakeLock +
+      ' model=' + S.model + ' chunk=' + S.chunk + '\n' +
       (diag.length ? diag.slice().reverse().join('\n') : '(tukšs)');
   };
   $('saveText').onclick = function () {
-    if (!history.length) { $('testResult').textContent = 'Stenogramma ir tukša.'; return; }
-    var txt = history.map(function (h) {
-      return h.t.toLocaleTimeString('lv-LV') + '\nEN: ' + h.en + '\nLV: ' + (h.lv || '');
+    var data = segs.filter(function (s) { return s.en; });
+    if (!data.length) { $('testResult').textContent = 'Stenogramma ir tukša.'; return; }
+    var txt = data.map(function (s) {
+      return 'EN: ' + s.en + '\nLV: ' + s.chunks.map(function (c) { return c.lv || c.en; }).join(' ');
     }).join('\n\n');
     var a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
@@ -606,9 +731,12 @@
     document.body.appendChild(a); a.click(); a.remove();
   };
   $('clearText').onclick = function () {
-    feed.querySelectorAll('.line').forEach(function (l) { l.remove(); });
-    if (currentLine) closeInterim(currentLine);
-    currentLine = null;
+    endUtter();
+    segs.forEach(function (s) { s.el.remove(); });
+    while (capText.firstChild) capText.removeChild(capText.firstChild);
+    capText.appendChild(caret);
+    segs = []; liveIndex = chunks.length - 1; prevCapH = 0;
+    liveEn.textContent = '';
   };
 
   /* ---------- Init ---------- */
@@ -617,4 +745,6 @@
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
   }
+  // test hook (harmless in production): lets the browser harness read latency numbers
+  window.__tulks = { latencySummary: latencySummary, chunks: chunks };
 })();
