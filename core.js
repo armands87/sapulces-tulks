@@ -157,6 +157,94 @@
     return w;
   }
 
+  /* ---------- Transcript (v5) ----------
+   * session = { startedAt: ms epoch, records: [{ t: ms from start, en, lv }] } */
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  function formatOffset(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000));
+    return pad2(Math.floor(s / 3600)) + ':' + pad2(Math.floor(s / 60) % 60) + ':' + pad2(s % 60);
+  }
+
+  function formatDateTime(d) {
+    return pad2(d.getDate()) + '.' + pad2(d.getMonth() + 1) + '.' + d.getFullYear() + ' ' +
+      pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+
+  function formatDuration(ms) {
+    var m = Math.round(ms / 60000);
+    if (m < 60) return m + ' min';
+    return Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
+  }
+
+  function transcriptFilename(startedAt, ext) {
+    var d = new Date(startedAt);
+    return 'sapulce-' + d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + '-' +
+      pad2(d.getHours()) + pad2(d.getMinutes()) + '.' + ext;
+  }
+
+  function capFirst(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+  /* Records that have something to show (empty segments are skipped). */
+  function usableRecords(records) {
+    return (records || []).filter(function (r) { return (r.lv && r.lv.trim()) || (r.en && r.en.trim()); });
+  }
+
+  function transcriptStats(session) {
+    var recs = usableRecords(session.records);
+    var last = recs.length ? recs[recs.length - 1].t : 0;
+    return { count: recs.length, durationMs: last,
+      words: recs.reduce(function (a, r) { return a + (r.lv || '').split(/\s+/).filter(Boolean).length; }, 0) };
+  }
+
+  function transcriptText(session, withEn) {
+    var recs = usableRecords(session.records), st = transcriptStats(session);
+    var out = ['Sapulces tulks: sarunas pieraksts',
+      'Sākums: ' + formatDateTime(new Date(session.startedAt)),
+      'Ilgums: ' + formatDuration(st.durationMs) + ', ' + st.count + ' runas daļas',
+      ''];
+    recs.forEach(function (r) {
+      var lv = capFirst((r.lv || '').trim()) || '[nav iztulkots]';
+      if (withEn) {
+        out.push('[' + formatOffset(r.t) + ']');
+        out.push('LV: ' + lv);
+        out.push('EN: ' + (r.en || '').trim());
+        out.push('');
+      } else {
+        out.push('[' + formatOffset(r.t) + '] ' + lv);
+      }
+    });
+    return out.join('\n').replace(/\n+$/, '') + '\n';
+  }
+
+  function escapeHtml(s) {
+    return String(s || '').replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  /* A self-contained page that reads well on a phone, in light and dark mode. */
+  function transcriptHtml(session, withEn) {
+    var recs = usableRecords(session.records), st = transcriptStats(session);
+    var title = 'Sapulce ' + formatDateTime(new Date(session.startedAt));
+    var rows = recs.map(function (r) {
+      return '<section><time>' + formatOffset(r.t) + '</time><p class="lv">' +
+        escapeHtml(capFirst((r.lv || '').trim()) || '[nav iztulkots]') + '</p>' +
+        (withEn ? '<p class="en">' + escapeHtml((r.en || '').trim()) + '</p>' : '') + '</section>';
+    }).join('\n');
+    return '<!doctype html>\n<html lang="lv"><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+      '<title>' + escapeHtml(title) + '</title><style>' +
+      ':root{color-scheme:light dark;--fg:#111;--bg:#fff;--dim:#666;--line:#ddd}' +
+      '@media (prefers-color-scheme:dark){:root{--fg:#eee;--bg:#000;--dim:#999;--line:#333}}' +
+      'body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:18px/1.5 system-ui,sans-serif;max-width:760px}' +
+      'h1{font-size:22px;margin:0 0 4px}.meta{color:var(--dim);margin:0 0 16px}' +
+      'section{border-top:1px solid var(--line);padding:10px 0}time{color:var(--dim);font-size:14px}' +
+      '.lv{margin:2px 0;font-weight:600}.en{margin:2px 0;color:var(--dim)}' +
+      '</style></head><body>\n<h1>' + escapeHtml(title) + '</h1>\n<p class="meta">Ilgums: ' +
+      formatDuration(st.durationMs) + ', ' + st.count + ' runas daļas</p>\n' + rows + '\n</body></html>\n';
+  }
+
   function median(arr) {
     if (!arr.length) return 0;
     var a = arr.slice().sort(function (x, y) { return x - y; });
@@ -305,6 +393,14 @@
   }
 
   root.TCore = {
+    formatOffset: formatOffset,
+    formatDateTime: formatDateTime,
+    formatDuration: formatDuration,
+    transcriptFilename: transcriptFilename,
+    transcriptStats: transcriptStats,
+    transcriptText: transcriptText,
+    transcriptHtml: transcriptHtml,
+    escapeHtml: escapeHtml,
     REVEAL_PRESETS: REVEAL_PRESETS,
     revealRate: revealRate,
     revealDelay: revealDelay,

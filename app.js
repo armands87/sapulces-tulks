@@ -103,10 +103,75 @@
   var lastSegEndAt = 0;
 
   function newSegData() {
+    var now = Date.now();
+    if (!store.startedAt) store.startedAt = now;
     var seg = { el: null, lvEl: null, enEl: null, en: '', chunks: [],
-      breakBefore: segs.length > 0 && Date.now() - lastSegEndAt > 2500 };
+      breakBefore: now - lastSegEndAt > 2500,
+      store: store, rec: { t: now - store.startedAt, en: '', lv: '' } };
+    store.records.push(seg.rec);
     segs.push(seg);
     return seg;
+  }
+
+  /* ---------- Transcript store (v5) ----------
+   * Independent of the screen: every speech segment of the whole conversation,
+   * persisted to localStorage so a reload or crash does not lose it. */
+  var STORE_KEY = 'tulks.session';
+  var store = { startedAt: 0, records: [] };
+  var dirty = false, persistTimer = null;
+
+  function syncRecord(seg) {
+    if (!seg || !seg.rec || seg.store !== store) return; // ignore late results of a cleared conversation
+    seg.rec.en = seg.en;
+    seg.rec.lv = seg.chunks.map(function (c) { return c.lv || (c.failed ? c.en : ''); })
+      .filter(Boolean).join(' ');
+    dirty = true;
+    schedulePersist();
+  }
+  function schedulePersist() {
+    if (persistTimer) return;
+    persistTimer = setTimeout(persistNow, 2500);
+  }
+  function persistNow() {
+    clearTimeout(persistTimer); persistTimer = null;
+    if (!store.records.length) return;
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({ v: 1, startedAt: store.startedAt, dirty: dirty, records: store.records }));
+    } catch (e) {
+      log('persist failed ' + (e && e.name));
+      showError('Telefona atmiņā nepietiek vietas sarunas glabāšanai. Saglabā sarunu tagad.', false);
+    }
+  }
+  function loadStored() {
+    try {
+      var s = JSON.parse(localStorage.getItem(STORE_KEY) || 'null');
+      if (s && s.startedAt && s.records && C.transcriptStats(s).count) return s;
+    } catch (e) {}
+    return null;
+  }
+  function clearStored() { try { localStorage.removeItem(STORE_KEY); } catch (e) {} }
+  window.addEventListener('pagehide', persistNow);
+  document.addEventListener('visibilitychange', function () { if (document.hidden) persistNow(); });
+
+  /* Put restored segments back on screen as history (fully shown, no reveal). */
+  function renderRestored(records) {
+    var prevT = null, prevText = '';
+    records.forEach(function (r) {
+      if (!(r.lv || r.en)) return;
+      var seg = { el: null, lvEl: null, enEl: null, en: r.en || '', chunks: [],
+        breakBefore: prevT === null || r.t - prevT > 8000 };
+      prevT = r.t;
+      ensureSegDom(seg);
+      var text = (r.lv || r.en || '').trim();
+      if (!prevText || /[.!?]["')]*$/.test(prevText)) text = text.charAt(0).toUpperCase() + text.slice(1);
+      prevText = text;
+      seg.lvEl.textContent = text;
+      if (!r.lv) seg.lvEl.classList.add('failed');
+    });
+    capText.appendChild(caret);
+    lastSegEndAt = 0;
+    lastRevealed = '.';
+    layout(true);
   }
 
   function ensureSegDom(seg) {
@@ -445,6 +510,7 @@
       c.done = true;
       if (!c.lv) c.failed = true;
       clearError(false);
+      syncRecord(c.seg);
       poke();
     }
     function fail(e) {
@@ -458,6 +524,7 @@
       }
       showError(info.msg, info.fatal);
       c.failed = true; // the revealer shows the English fragment instead
+      syncRecord(c.seg);
       poke();
     }
 
@@ -486,6 +553,7 @@
     u.words = words;
     u.seg.en = words.join(' ');
     if (u.seg.enEl) u.seg.enEl.textContent = u.seg.en;
+    syncRecord(u.seg);
     liveEn.textContent = C.tail(u.seg.en, 90);
   }
 
@@ -525,7 +593,11 @@
     clearTimeout(pauseTimer);
     if (utter) {
       runChunker('final');
-      if (!utter.seg.chunks.length) segs.splice(segs.indexOf(utter.seg), 1); // never shown
+      if (!utter.seg.chunks.length) { // never shown: drop it from screen model and transcript
+        segs.splice(segs.indexOf(utter.seg), 1);
+        var ri = store.records.indexOf(utter.seg.rec);
+        if (ri >= 0) store.records.splice(ri, 1);
+      }
       lastSegEndAt = Date.now();
     }
     utter = null;
@@ -699,6 +771,7 @@
     if (S.engine === 'chrome' && !('Translator' in self)) {
       openSettings(); $('testResult').textContent = 'Chrome iebūvētais tulkotājs šajā ierīcē nav pieejams. Izvēlies OpenAI.'; return;
     }
+    if (pendingRestore) restore(); // never lose an unsaved conversation by just pressing Start
     clearError(false);
     running = true; fails = 0; notAllowedCount = 0;
     log('START model=' + S.model + ' chunk=' + S.chunk + ' reveal=' + S.reveal + ' mode=' + S.mode);
@@ -857,16 +930,131 @@
       ' model=' + S.model + ' chunk=' + S.chunk + ' reveal=' + S.reveal + '\n' +
       (diag.length ? diag.slice().reverse().join('\n') : '(tukšs)');
   };
-  $('saveText').onclick = function () {
-    var data = segs.filter(function (s) { return s.en; });
-    if (!data.length) { $('testResult').textContent = 'Stenogramma ir tukša.'; return; }
-    var txt = data.map(function (s) {
-      return 'EN: ' + s.en + '\nLV: ' + s.chunks.map(function (c) { return c.lv || c.en; }).join(' ');
-    }).join('\n\n');
+  /* ---------- Save dialog (v5) ---------- */
+  var saveDlg = $('saveDlg'), saveResult = $('saveResult');
+  var newConvArmed = false;
+
+  function radio(name) { var el = document.querySelector('input[name=' + name + ']:checked'); return el ? el.value : ''; }
+
+  function buildExport() {
+    persistNow();
+    var withEn = radio('saveLang') !== 'lv';
+    var html = radio('saveFmt') === 'html';
+    var content = html ? C.transcriptHtml(store, withEn) : C.transcriptText(store, withEn);
+    var name = C.transcriptFilename(store.startedAt || Date.now(), html ? 'html' : 'txt');
+    var type = html ? 'text/html' : 'text/plain';
+    return { content: content, name: name, type: type };
+  }
+
+  function openSave() {
+    var st = C.transcriptStats(store);
+    newConvArmed = false;
+    $('newConv').textContent = 'Jauna saruna';
+    saveResult.textContent = '';
+    $('saveInfo').textContent = st.count
+      ? 'Sākums ' + C.formatDateTime(new Date(store.startedAt)) + ', ' + C.formatDuration(st.durationMs) +
+        ', ' + st.count + ' runas daļas, ' + st.words + ' vārdi.' + (dirty ? '' : ' Jau saglabāts.')
+      : 'Saruna vēl ir tukša.';
+    ['saveShare', 'saveDownload', 'saveCopy'].forEach(function (id) { $(id).disabled = !st.count; });
+    if (saveDlg.showModal) saveDlg.showModal(); else saveDlg.setAttribute('open', '');
+  }
+
+  function markSaved(how) {
+    dirty = false; persistNow();
+    saveResult.textContent = how;
+    log('saved: ' + how);
+  }
+
+  function download(ex) {
     var a = document.createElement('a');
-    a.href = URL.createObjectURL(new Blob([txt], { type: 'text/plain;charset=utf-8' }));
-    a.download = 'sapulce-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.txt';
+    a.href = URL.createObjectURL(new Blob([ex.content], { type: ex.type + ';charset=utf-8' }));
+    a.download = ex.name;
     document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 10000);
+    markSaved('Lejupielādēts: ' + ex.name);
+  }
+
+  /* Android Chrome: share sheet with the file (Drive, e-mail, Telegram...). Else download. */
+  $('saveShare').onclick = function () {
+    var ex = buildExport(), file = null;
+    try { file = new File([ex.content], ex.name, { type: ex.type }); } catch (e) {}
+    if (file && navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file], title: ex.name }).then(function () {
+        markSaved('Nosūtīts: ' + ex.name);
+      }).catch(function (e) {
+        if (e && e.name === 'AbortError') { saveResult.textContent = 'Dalīšanās atcelta.'; return; }
+        download(ex);
+      });
+    } else {
+      download(ex);
+    }
+  };
+  $('saveDownload').onclick = function () { download(buildExport()); };
+  $('saveCopy').onclick = function () {
+    var withEn = radio('saveLang') !== 'lv';
+    var text = C.transcriptText(store, withEn);
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      saveDlg.appendChild(ta); ta.select();
+      var ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+      if (ok) markSaved('Nokopēts starpliktuvē.'); else saveResult.textContent = 'Neizdevās nokopēt.';
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { markSaved('Nokopēts starpliktuvē.'); }, fallback);
+    } else fallback();
+  };
+
+  function newConversation() {
+    endUtter();
+    $('clearText').onclick();
+    store = { startedAt: 0, records: [] };
+    segs = [];
+    dirty = false;
+    clearStored();
+    lastSegEndAt = 0;
+    log('new conversation');
+  }
+  $('newConv').onclick = function () {
+    var st = C.transcriptStats(store);
+    if (st.count && dirty && !newConvArmed) {
+      newConvArmed = true;
+      this.textContent = 'Dzēst bez saglabāšanas';
+      saveResult.textContent = 'Šī saruna vēl nav saglabāta. Vispirms nospied "Saglabāt / dalīties", vai nospied vēlreiz, lai dzēstu.';
+      return;
+    }
+    newConversation();
+    saveDlg.close();
+  };
+  $('openSave').onclick = openSave;
+  $('saveText').onclick = function () { dlg.close(); openSave(); };
+
+  /* ---------- Restore after reload ---------- */
+  var pendingRestore = loadStored();
+  function restore() {
+    if (!pendingRestore) return;
+    store = { startedAt: pendingRestore.startedAt, records: pendingRestore.records };
+    dirty = pendingRestore.dirty !== false;
+    renderRestored(store.records);
+    pendingRestore = null;
+    $('restoreBar').hidden = true;
+    log('restored ' + store.records.length + ' segments');
+  }
+  if (pendingRestore) {
+    var rs = C.transcriptStats(pendingRestore);
+    $('restoreText').textContent = 'Atrasta iepriekšējā saruna: sākums ' +
+      C.formatDateTime(new Date(pendingRestore.startedAt)) + ', ' + rs.count + ' runas daļas.';
+    $('restoreBar').hidden = false;
+  }
+  $('restoreYes').onclick = restore;
+  $('restoreNo').onclick = function () {
+    if (pendingRestore && pendingRestore.dirty !== false &&
+        !confirm('Iepriekšējā saruna nav saglabāta. Atjaunot to, lai saglabātu? (Atcelt = dzēst)')) {
+      pendingRestore = null; clearStored(); $('restoreBar').hidden = true; return;
+    }
+    if (pendingRestore && pendingRestore.dirty !== false) { restore(); openSave(); return; }
+    pendingRestore = null; clearStored(); $('restoreBar').hidden = true;
   };
   $('clearText').onclick = function () {
     endUtter();
@@ -892,6 +1080,7 @@
   // test hook (harmless in production): lets the browser harness read numbers
   window.__tulks = {
     latencySummary: latencySummary, chunks: chunks, revealLog: [],
-    backlog: backlog, isFrozen: function () { return frozen; }
+    backlog: backlog, isFrozen: function () { return frozen; },
+    store: function () { return store; }, isDirty: function () { return dirty; }, persistNow: persistNow
   };
 })();

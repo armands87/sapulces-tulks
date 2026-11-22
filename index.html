@@ -14,6 +14,7 @@
 </head>
 <body class="mode-captions">
   <header id="bar">
+    <button id="openSave" class="save-btn" aria-label="Saglabāt sarunu">Saglabāt</button>
     <div class="tools">
       <button id="smaller" aria-label="Mazāks teksts">A−</button>
       <button id="bigger" aria-label="Lielāks teksts">A+</button>
@@ -27,6 +28,14 @@
   <div id="errorBar" class="error-bar" role="alert" hidden>
     <span id="errorText"></span>
     <button id="errorClose" aria-label="Aizvērt kļūdas ziņu">×</button>
+  </div>
+
+  <div id="restoreBar" class="restore-bar" hidden>
+    <span id="restoreText"></span>
+    <div class="actions">
+      <button id="restoreYes" class="primary">Atjaunot iepriekšējo sarunu</button>
+      <button id="restoreNo">Sākt jaunu</button>
+    </div>
   </div>
 
   <main id="feed">
@@ -45,6 +54,37 @@
     </div>
     <button id="startStop" class="big start">Sākt</button>
   </footer>
+
+  <dialog id="saveDlg">
+    <form method="dialog">
+      <h2>Saglabāt sarunu</h2>
+      <p id="saveInfo" class="note"></p>
+      <fieldset>
+        <legend>Saturs</legend>
+        <label class="row"><input type="radio" name="saveLang" value="lven" checked> Latviski + angliski</label>
+        <label class="row"><input type="radio" name="saveLang" value="lv"> Tikai latviski</label>
+      </fieldset>
+      <fieldset>
+        <legend>Formāts</legend>
+        <label class="row"><input type="radio" name="saveFmt" value="txt" checked> Teksts (.txt)</label>
+        <label class="row"><input type="radio" name="saveFmt" value="html"> Lapa telefonam (.html)</label>
+      </fieldset>
+      <div class="actions">
+        <button type="button" id="saveShare" class="primary big-action">Saglabāt / dalīties</button>
+      </div>
+      <div class="actions">
+        <button type="button" id="saveDownload">Lejupielādēt</button>
+        <button type="button" id="saveCopy">Kopēt</button>
+      </div>
+      <p id="saveResult" class="note" aria-live="polite"></p>
+      <hr>
+      <div class="actions">
+        <button type="button" id="newConv" class="danger">Jauna saruna</button>
+        <button value="close" class="primary">Aizvērt</button>
+      </div>
+      <p class="note">Saruna tiek glabāta šajā telefonā, līdz nospied "Jauna saruna". Arī pēc lapas pārlādes to var atjaunot.</p>
+    </form>
+  </dialog>
 
   <dialog id="settings">
     <form method="dialog" id="settingsForm">
@@ -119,7 +159,7 @@
       <p id="testResult" class="note"></p>
       <pre id="diag" class="diag" hidden></pre>
       <div class="actions">
-        <button type="button" id="saveText">Saglabāt stenogrammu</button>
+        <button type="button" id="saveText">Saglabāt sarunu…</button>
         <button type="button" id="clearText">Notīrīt ekrānu</button>
         <button type="button" id="fullscreen">Pilnekrāns</button>
         <button value="close" class="primary">Gatavs</button>

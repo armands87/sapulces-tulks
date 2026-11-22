@@ -2,6 +2,35 @@
 
 Telefona tīmekļa lietotne (PWA): klausās angļu runu caur mikrofonu un uzreiz rāda latviešu tulkojumu lieliem burtiem. Paredzēta Chrome pārlūkam Android telefonā, kas sapulces laikā stāv uz galda blakus datoram un uz kuru skatās ar acs kaktiņu.
 
+## v5 (22.11): sarunas saglabāšana
+
+- **Poga "Saglabāt"** augšējā joslā kreisajā pusē (zaļa). Pieejama arī pēc Apturēt un ⚙ → "Saglabāt sarunu…".
+- **Visa saruna, ne tikai ekrāns**: atsevišķa pieraksta krātuve (katra runas daļa: laiks no sākuma, latviešu tulkojums, angļu oriģināls), neatkarīga no ekrāna vēstures (kas ir līdz 400 daļām). 2 stundu sapulce ir ap 230 KB, telefona `localStorage` vieta ir ~5 MB.
+- **Neatkarīga no pārlādes**: krātuve tiek ierakstīta `localStorage` ik pēc 2,5 s un vienmēr, kad lapa aiziet fonā vai tiek aizvērta. Pēc pārlādes augšā parādās "Atrasta iepriekšējā saruna… [Atjaunot iepriekšējo sarunu] [Sākt jaunu]". Atjaunotais teksts atgriežas ekrānā, un jaunā runa turpina to pašu sarunu (laiki turpinās). Ja nospiež Sākt, neko neizvēloties, saruna tiek atjaunota automātiski (lai nekas nepazūd). "Sākt jaunu" nesaglabātai sarunai vispirms jautā.
+- **Saglabāšanas logs**: Saturs: Latviski + angliski / Tikai latviski. Formāts: Teksts (.txt) / Lapa telefonam (.html, lieli burti, gaišs un tumšs režīms). Pogas:
+  - **Saglabāt / dalīties**: Android Chrome atver dalīšanās izvēlni ar failu (Drive, e-pasts, Telegram…). Ja dalīšanās nav pieejama, fails tiek lejupielādēts. Ja lietotājs dalīšanos atceļ, nekas netiek lejupielādēts.
+  - **Lejupielādēt**: vienmēr parasta lejupielāde.
+  - **Kopēt**: viss teksts starpliktuvē.
+  - **Jauna saruna**: notīra pierakstu un ekrānu. Ja saruna nav saglabāta, pirmā nospiešana tikai brīdina ("Dzēst bez saglabāšanas"), otrā dzēš.
+- **Faila nosaukums**: `sapulce-2026-11-22-1830.txt` (pirmās runas datums un laiks).
+- **Saturs** (.txt, latviski + angliski):
+
+```
+Sapulces tulks: sarunas pieraksts
+Sākums: 22.11.2026 18:30
+Ilgums: 1 h 12 min, 143 runas daļas
+
+[00:00:05]
+LV: Paldies visiem, ka pievienojāties.
+EN: thanks everyone for joining
+```
+
+  Tikai latviski: viena rinda katrai daļai, `[00:00:05] Paldies visiem, ka pievienojāties.` Neiztulkota daļa: `[nav iztulkots]` + angļu teksts.
+
+Pārbaudīts: 97 loģikas testi (laiki, nosaukums, teksts, HTML ar drošu speciālo rakstzīmju apstrādi, 2 h sapulces apjoms); pārlūkā ar viltotu mikrofonu: pieraksts un glabāšana, pārlāde → atjaunošana → turpināšana, Jauna saruna divos soļos, dalīšanās (arī atcelta), lejupielāde .html tikai latviski, kopēšana. Dalīšanās, lejupielāde un starpliktuve pārbaudītas ar aizstātām pārlūka funkcijām, ne ar īstu Android dalīšanās izvēlni.
+
+Ekrānuzņēmumi: `screens/live-dark.png` (josla ar pogu Saglabāt), `screens/save-dialog-dark.png`, kā arī `live-light`, `frozen-dark`, `frozen-light`.
+
 ## v4 (22.11): vienmērīga parādīšanās, nekas nepazūd
 
 ### Problēma (lietotāja atsauksme par v3)
@@ -117,8 +146,8 @@ Runas atpazīšana (Google, caur Chrome) ir bez maksas.
 | `index.html`, `style.css` | Ekrāns: subtitru logs, A−/A+, režīms (CC / 1 / ≡), EN, fons, ⚙; apakšā statuss un Sākt/Apturēt |
 | `app.js` | Runas atpazīšana ar automātisku restartu un sargsuni, frāžu dalītājs, paralēla straumēta tulkošana, kļūdu josla, aiztures mērījums, ātruma tests, Wake Lock, stenogramma |
 | `core.js` | Loģika bez DOM: frāžu dalītājs, uzdevums, kļūdu klasifikācija, sargsuņa lēmumi, straumes parsētājs |
-| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v4` |
-| `test/run-tests.js` | 79 loģikas testi (arī lasīšanas tempa testi), bez interneta un atslēgas |
+| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v5` |
+| `test/run-tests.js` | 97 loģikas testi (arī lasīšanas tempa un pieraksta testi), bez interneta un atslēgas |
 | `test/mocks.js` | Viltots mikrofons (arī `MOCK.speak` ar runas ātrumu, `MOCK.slowCalls` lēna pieprasījuma testam) un viltots OpenAI (labi, iekāras, apstājas, 401, kredīts, 429; aizture `MOCK.ttft`) |
 | `test/demo.js` | Scenārijs ekrānuzņēmumiem (`#demo-dark`, `#demo-light`, `#demo-dark-frozen`, `#demo-light-frozen`) |
 | `test/make-icons.rb` | PNG ikonas |
@@ -167,7 +196,7 @@ Repozitorijs `armands87/sapulces-tulks`, adrese `https://armands87.github.io/sap
 
 Publicējamie faili: `index.html`, `style.css`, `core.js`, `app.js`, `sw.js`, `manifest.json`, `icons/`, `README.md`. `test/` var publicēt vai nepublicēt. **Nepublicē** `screens/` un nevienu lapu, kas ielādē `test/mocks.js`.
 
-Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v4`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
+Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v5`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
 
 ## Uzstādīšana telefonā
 
