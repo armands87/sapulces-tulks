@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="lv">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Sapulces tulks</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header id="bar">
+    <span id="status" class="status off" aria-live="polite">Gaida</span>
+    <div class="tools">
+      <button id="smaller" aria-label="Mazāks teksts">A−</button>
+      <input id="size" type="range" min="20" max="96" step="2" aria-label="Teksta izmērs">
+      <button id="bigger" aria-label="Lielāks teksts">A+</button>
+      <button id="toggleEn" aria-label="Rādīt angļu tekstu">EN</button>
+      <button id="toggleTheme" aria-label="Mainīt fonu">◐</button>
+      <button id="fullscreen" aria-label="Pilnekrāns">⛶</button>
+      <button id="openSettings" aria-label="Iestatījumi">⚙</button>
+    </div>
+  </header>
+
+  <main id="feed" aria-live="polite">
+    <p id="hint" class="hint">Nospied <b>Sākt</b> un novieto telefonu pie skaļruņa.<br>Pirmajā reizē atver ⚙ un ielīmē OpenAI atslēgu.</p>
+  </main>
+
+  <footer>
+    <button id="startStop" class="big start">Sākt</button>
+  </footer>
+
+  <dialog id="settings">
+    <form method="dialog" id="settingsForm">
+      <h2>Iestatījumi</h2>
+
+      <label>Tulkošanas veids
+        <select id="engine">
+          <option value="openai">OpenAI (labākā kvalitāte, maksas)</option>
+          <option value="chrome">Chrome iebūvētais tulkotājs (bezmaksas, zemāka kvalitāte)</option>
+        </select>
+      </label>
+      <p id="chromeNote" class="note"></p>
+
+      <label>OpenAI API atslēga
+        <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
+      </label>
+      <p class="note">Atslēga glabājas tikai šajā telefonā (localStorage) un tiek sūtīta tikai uz api.openai.com.</p>
+
+      <label>Modelis
+        <input id="model" list="models" spellcheck="false">
+        <datalist id="models">
+          <option value="gpt-4.1-mini">
+          <option value="gpt-4o-mini">
+          <option value="gpt-4.1-nano">
+          <option value="gpt-5-nano">
+          <option value="gpt-5-mini">
+        </datalist>
+      </label>
+      <p class="note">Ieteicams gpt-4.1-mini (ātrs, labs latviešu valodā). Lētāk: gpt-4o-mini.</p>
+
+      <label class="row"><input id="interim" type="checkbox"> Ātrais režīms: tulkot jau runas laikā (zemāka aizture, ~2x dārgāk)</label>
+      <label class="row"><input id="showEn" type="checkbox"> Rādīt angļu oriģinālu zem tulkojuma</label>
+      <label class="row"><input id="lightTheme" type="checkbox"> Balts fons, melni burti</label>
+
+      <label>Redzamo teikumu skaits: <span id="linesVal"></span>
+        <input id="lines" type="range" min="3" max="12" step="1">
+      </label>
+
+      <div class="actions">
+        <button type="button" id="testKey">Pārbaudīt</button>
+        <button type="button" id="saveText">Saglabāt stenogrammu</button>
+        <button type="button" id="clearText">Notīrīt ekrānu</button>
+      </div>
+      <p id="testResult" class="note"></p>
+      <div class="actions">
+        <button value="close" class="primary">Gatavs</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
