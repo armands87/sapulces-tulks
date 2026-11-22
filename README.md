@@ -2,6 +2,71 @@
 
 Telefona tīmekļa lietotne (PWA): klausās angļu runu caur mikrofonu un uzreiz rāda latviešu tulkojumu lieliem burtiem. Paredzēta Chrome pārlūkam Android telefonā, kas sapulces laikā stāv uz galda blakus datoram un uz kuru skatās ar acs kaktiņu.
 
+## v7 (22.11): vienmērīgāka plūsma un labošana pēc konteksta
+
+### 1. Raustīšanās un aizture
+
+Kur radās "aizķeršanās":
+- **Frāzes gaidīšana**: frāze tika sūtīta tikai pēc 4 stabiliem vārdiem vai 0,6 s pauzes.
+- **"Grūdiens, pauze, grūdiens"**: frāzes tulkojums (4 līdz 5 vārdi) parādījās ar 3,5 vārdiem/s, tad ekrāns stāvēja, līdz atnāca nākamā frāze. Ja OpenAI atbildēja lēnāk (300 līdz 1300 ms svārstības mobilajā tīklā), pauze bija ilga un izskatījās, ka viss sastingst.
+- **Paslēptā josla** ar izplūduma efektu tika zīmēta arī tad, kad nebija redzama (lieks darbs telefonam).
+
+Izmaiņas:
+- Frāze tiek sūtīta pēc **3 stabiliem vārdiem** vai **0,45 s** pauzes (bija 4 un 0,6 s).
+- **Elastīgs temps**: kad rindā ir tikai 1 līdz 3 vārdi, parādīšanās ātrums seko tam, cik ātri tulkojumi reāli pienāk (pēdējās 8 s), un pēdējais vārds rindā tiek nedaudz "izstiepts", lai nākamā frāze parasti paspēj atnākt, pirms ekrāns paliek tukšs. Lielai rindai paātrinājums kā v4 (līdz 7 vārdiem/s).
+- **Gaidīšanas rādītājs**: ja vārdu tiešām nav, kursors "elpo" (lēni pulsē), nevis izskatās sastindzis.
+- Rezerves pieprasījums (hedge) pēc 2,5 s (bija 3 s). Silts savienojums kā iepriekš.
+- Paslēptā josla netiek zīmēta.
+
+Mērījums imitācijā (tie paši 4 teikumi, 66 vārdi, 2,5 vārdi/s, OpenAI 300 līdz 1300 ms ar vienādu nejaušības sēklu):
+
+| | v6 | v7 |
+|---|---|---|
+| Pauzes starp vārdiem > 0,7 s | 11 | **5** |
+| Pauzes > 1 s | 5 | **1** |
+| Garākā pauze | 1,66 s | **1,21 s** |
+| 90 % paužu īsākas par | 0,88 s | **0,52 s** |
+| Aizture līdz ekrānam (mediāna) | 1,97 s | **1,85 s** |
+| Gaidīšana uz frāzi (mediāna) | 1,00 s | **0,80 s** |
+
+Vidējā atstarpe starp vārdiem pieauga no 0,29 uz 0,38 s: tā ir vienmērīgāka plūsma, nevis lēnāka (kopējā aizture samazinājās).
+
+### 2. Precizitāte: konteksts un labošana
+
+Problēma: Chrome runas atpazīšana sadzird nepareizi (homofoni "write/right", sadalīti vārdi "write size" = "rightsize", sagrozīti vārdi un nosaukumi). Burtisks tulkojums tad ir neloģisks.
+
+1. **Sapulces tēma, vārdi un nosaukumi**: jauns lauks sākuma ekrānā (un iestatījumos), piem. "Smoothbev, Roman, Sarah, EV lādētāji, Q3 budžets". Tas tiek iekļauts uzdevumā kā glosārijs: pareizā rakstība un "nepareizi sadzirdēts vārds visticamāk ir viens no šiem".
+2. **Ātrā tulkojuma uzdevums** tagad skaidri saka: angļu teksts ir no automātiskās runas atpazīšanas, nosaki, ko runātājs domāja, tulko jēgu loģiskā latviešu valodā, nekad netulko acīmredzami nepareizi sadzirdētu vārdu burtiski, ja to nevar saprast, izlaid. Konteksts: ~500 rakstzīmes iepriekšējās angļu runas un ~500 rakstzīmes paša latviskā tulkojuma (apmēram 8 līdz 12 teikumi, bija 160).
+3. **Labošana pēc konteksta** (iestatījumos, pēc noklusējuma ieslēgta): kad frāzes grupa (~8 vārdi vai teikuma beigas) ir parādīta un ir zināmi nākamie vārdi (vai pagājušas 2,5 s), tā tiek klusi pārbaudīta vēlreiz ar kontekstu pirms UN pēc tās, glosāriju un atpazīšanas alternatīvām. Atbilde JSON formā.
+   - Ekrāns mainās **tikai**, ja jaunais tulkojums atšķiras būtiski (mainīts satura vārds vai 2+ vārdi; pieturzīmes, lielie burti un viens īss vārds neskaitās), rinda jau ir pilnībā parādīta, vēl redzama un lietotājs nav ritinājis atpakaļ lasīt. Tad īsa pārzīmēšana (0,2 s izgaišana, 0,5 s parādīšanās) un smalks punktēts pasvītrojums.
+   - Pieraksts **vienmēr** glabā labojumu; .html pierakstā mazā pārsvītrotā rindā redzams arī pirmais variants.
+   - Imitācijā labojums parādās ~3 s pēc frāzes tulkojuma.
+4. **Atpazīšanas alternatīvas**: `maxAlternatives = 3`; ja Chrome tās dod (Android bieži dod tikai vienu), tās tiek nodotas labošanai kā mājieni.
+
+Piemērs imitācijā (`screens/8-correction-off.png` un `9-correction-on.png`):
+
+| Atpazīts (EN) | Ātrais tulkojums | Pēc labošanas |
+|---|---|---|
+| we need to write size the budget | Mums vajag rakstīt izmēru budžetam. | Mums budžets jāpielāgo vajadzīgajam apjomam. |
+| I spoke with roaming from smooth bev | Es runāju ar viesabonēšanu no gludā bev. | Es runāju ar Romanu no Smoothbev. |
+
+(Imitācijā labojumus "zina" viltotais OpenAI; reālo kvalitāti nosaka modelis, skatīt zemāk.)
+
+**Kompromiss, godīgi**: labošana nozīmē, ka teksts dažreiz mainās jau pēc parādīšanās, ko lietotājs agrāk negribēja. Tāpēc tikai būtiski labojumi, tikai redzamās rindās, tikai sekojot tiešraidei, ar mierīgu pārzīmēšanu. Ja tas traucē: iestatījumi → Labošana pēc konteksta → Izslēgta (precizitāti joprojām uzlabo glosārijs un garāks konteksts ātrajā tulkojumā). Īsākas frāzes (3 vārdi) ātrajā tulkojumā ir nedaudz sliktākas valodiski; to kompensē garāks konteksts un labošana.
+
+### Izmaksas stundā (aplēse, cenas jāpārbauda openai.com/api/pricing)
+
+| | stundā |
+|---|---|
+| Ātrais tulkojums gpt-4.1-mini (garāks konteksts, ~2200 pieprasījumi) | ~$0,52 |
+| + labošana gpt-4.1-mini (~780 pieprasījumi) | +$0,25 (kopā **~$0,77**, noklusējums) |
+| + labošana gpt-4.1 (precīzāks) | +$1,26 (kopā ~$1,79) |
+| Labošana izslēgta | ~$0,52 |
+
+v6 bija ~$0,16/h; pieaugums nāk no garākā konteksta (labākai precizitātei) un labošanas.
+
+Ekrānuzņēmumi: `screens/1-start-topic.png` (sākuma ekrāns ar tēmas lauku), `screens/8-correction-off.png`, `screens/9-correction-on.png`.
+
 ## v6 (22.11): jauns, mierīgs interfeiss
 
 Lietotājam nepatika v5 izskats. v6 pārbūvē visu interfeisu, loģika nemainās (subtitri, lasīšanas temps, apturēšana un "Atpakaļ uz tiešraidi", saglabāšana un atjaunošana, diagnostika, ātruma tests).
@@ -164,8 +229,8 @@ Runas atpazīšana (Google, caur Chrome) ir bez maksas.
 | `index.html`, `style.css` | v6 interfeiss: sākuma ekrāns, subtitri, apakšējā josla (izmērs, Saglabāt, Apturēt/Turpināt), iestatījumu un saglabāšanas lapas |
 | `app.js` | Runas atpazīšana ar automātisku restartu un sargsuni, frāžu dalītājs, paralēla straumēta tulkošana, kļūdu josla, aiztures mērījums, ātruma tests, Wake Lock, stenogramma |
 | `core.js` | Loģika bez DOM: frāžu dalītājs, uzdevums, kļūdu klasifikācija, sargsuņa lēmumi, straumes parsētājs |
-| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v6` |
-| `test/run-tests.js` | 98 loģikas testi (arī lasīšanas tempa, pieraksta un locījumu testi), bez interneta un atslēgas |
+| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v7` |
+| `test/run-tests.js` | 128 loģikas testi (arī labošanas, elastīgā tempa, pieraksta un locījumu testi), bez interneta un atslēgas |
 | `test/mocks.js` | Viltots mikrofons (arī `MOCK.speak` ar runas ātrumu, `MOCK.slowCalls` lēna pieprasījuma testam) un viltots OpenAI (labi, iekāras, apstājas, 401, kredīts, 429; aizture `MOCK.ttft`) |
 | `test/demo.js` | Scenārijs ekrānuzņēmumiem (`#demo-start`, `#demo-dark`, `#demo-dark-controls`, `#demo-dark-settings`, `#demo-dark-save`, `#demo-dark-frozen`, `#demo-light-controls`) |
 | `test/make-icons.rb` | PNG ikonas |
@@ -214,7 +279,7 @@ Repozitorijs `armands87/sapulces-tulks`, adrese `https://armands87.github.io/sap
 
 Publicējamie faili: `index.html`, `style.css`, `core.js`, `app.js`, `sw.js`, `manifest.json`, `icons/`, `README.md`. `test/` var publicēt vai nepublicēt. **Nepublicē** `screens/` un nevienu lapu, kas ielādē `test/mocks.js`.
 
-Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v6`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
+Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v7`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
 
 ## Uzstādīšana telefonā
 

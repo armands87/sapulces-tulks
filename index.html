@@ -57,6 +57,10 @@
       <p id="startHint" class="start-hint">Novieto telefonu pie skaļruņa.<br>Angļu runa parādīsies latviski.</p>
       <button id="keyHint" class="btn tonal" hidden>Pievienot OpenAI atslēgu</button>
     </div>
+    <label class="topic">
+      <span>Sapulces tēma, vārdi un nosaukumi <em>(nav obligāti)</em></span>
+      <textarea id="glossary" rows="2" spellcheck="false" placeholder="piem. Smoothbev, EV lādētāji, Roman, Sarah, Q3 budžets, rightsizing"></textarea>
+    </label>
   </section>
 
   <!-- Captions -->
@@ -156,6 +160,29 @@
           </div>
           <small id="chromeNote" class="hint"></small>
         </div>
+        <label class="field">
+          <span class="label">Sapulces tēma, vārdi un nosaukumi</span>
+          <textarea id="glossary2" class="text area" rows="2" spellcheck="false" placeholder="piem. Smoothbev, Roman, Q3 budžets"></textarea>
+          <small class="hint">Palīdz pareizi saprast nosaukumus un terminus, ko runas atpazīšana sajauc.</small>
+        </label>
+        <div class="field">
+          <span class="label">Labošana pēc konteksta</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="correct" value="on"><span>Ieslēgta</span></label>
+            <label><input type="radio" name="correct" value="off"><span>Izslēgta</span></label>
+          </div>
+          <small class="hint">Pēc dažām sekundēm vēlreiz pārbauda jau parādīto tekstu ar nākamo teikumu kontekstu un izlabo nepareizi sadzirdētus vārdus. Labotā rinda viegli pārzīmējas un tiek atzīmēta ar punktētu pasvītrojumu.</small>
+        </div>
+        <label class="field" id="corrModelField">
+          <span class="label">Labošanas modelis</span>
+          <input id="corrModel" class="text" list="corrModels" spellcheck="false">
+          <datalist id="corrModels">
+            <option value="gpt-4.1-mini">
+            <option value="gpt-4.1">
+            <option value="gpt-5-mini">
+          </datalist>
+          <small class="hint">gpt-4.1-mini: ap $0,25 stundā papildus. gpt-4.1: precīzāks, ap $1,3 stundā papildus.</small>
+        </label>
         <label class="field">
           <span class="label">OpenAI atslēga</span>
           <input id="apiKey" class="text" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">

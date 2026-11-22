@@ -369,3 +369,31 @@ body:not(.light) .segmented input:checked + span { background: #48484a; }
 /* no focus ring when a sheet opens by touch; keyboard focus still shows */
 dialog.sheet button:focus:not(:focus-visible), dialog.sheet .sheet-head button:focus { outline: none; }
 .btn:focus-visible, .icon-btn:focus-visible, .dock-btn:focus-visible, .primary-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ---------- v7: smoother flow and context corrections ---------- */
+/* Hidden dock is not drawn at all (its blur is expensive on phones) */
+body.calm #dock { visibility: hidden; transition: transform .35s cubic-bezier(.2,.8,.2,1), opacity .3s, visibility 0s .35s; }
+/* Waiting for the next words: the cursor breathes instead of blinking, so it never looks frozen */
+body.running.awaiting .caret { animation: breathe 1.2s ease-in-out infinite; visibility: visible; }
+@keyframes breathe { 0%, 100% { opacity: .25; transform: scaleY(.7); } 50% { opacity: 1; transform: scaleY(1); } }
+/* Correction: quick crossfade, then a subtle dotted underline */
+.chunk.fixing { opacity: .15; transition: opacity .18s ease; }
+.chunk.fixed {
+  text-decoration: underline dotted;
+  text-decoration-color: color-mix(in srgb, var(--muted) 70%, transparent);
+  text-decoration-thickness: .06em;
+  text-underline-offset: .2em;
+  animation: fixin .5s ease;
+}
+@keyframes fixin { from { opacity: .15; } }
+/* Topic / glossary on the start screen */
+.topic { display: flex; flex-direction: column; gap: 6px; margin: 0 4px 8px; }
+.topic span { font-size: 13px; color: var(--muted); }
+.topic em { font-style: normal; opacity: .8; }
+.topic textarea, textarea.text.area {
+  font: inherit; font-size: 15px; line-height: 1.4; resize: none;
+  padding: 10px 14px; border-radius: 14px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--text); min-height: 48px;
+}
+.topic textarea:focus, textarea.text.area:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+textarea.text.area { background: var(--bg); }

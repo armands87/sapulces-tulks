@@ -49,27 +49,39 @@
    */
   var CHUNK_PROMPT =
     'You are a simultaneous interpreter, English to Latvian, at a business meeting. ' +
-    'You get the next fragment of live speech recognition (no punctuation, may have errors) ' +
-    'and the Latvian you have already said. Output ONLY the Latvian for the new fragment, ' +
+    'The English comes from AUTOMATIC SPEECH RECOGNITION: no punctuation, and some words are ' +
+    'misheard (homophones like write/right, split or merged words like "write size" for "rightsize", ' +
+    'mangled names and jargon). Using the earlier conversation and the glossary, infer what the ' +
+    'speaker actually meant and translate THAT meaning into natural, logical Latvian. Never translate ' +
+    'an obviously misheard word literally; if a word makes no sense and you cannot infer it, leave it out. ' +
+    'You also get the Latvian you have already said. Output ONLY the Latvian for the new fragment, ' +
     'continuing your Latvian naturally: no repetition of earlier text, no quotes, no comments. ' +
-    'Lowercase unless a new sentence starts. Keep names, companies, products, numbers and ' +
-    'technical terms. Fix obvious recognition errors. Never use em dashes.';
+    'Lowercase unless a new sentence starts. Keep names, companies, products, numbers and technical ' +
+    'terms (glossary spelling wins). Never use em dashes.';
 
-  function buildChunkMessages(fragment, prevEn, prevLv, endsSentence) {
+  function glossaryLine(glossary) {
+    var g = (glossary || '').replace(/\s+/g, ' ').trim().slice(0, 600);
+    return g ? '\nMeeting topic and glossary (names, terms, acronyms; misheard words are often these): ' + g : '';
+  }
+
+  function buildChunkMessages(fragment, prevEn, prevLv, endsSentence, glossary) {
     var user = '';
     if (prevEn) user += 'Earlier English: ' + prevEn + '\n';
     if (prevLv) user += 'Your Latvian so far: ' + prevLv + '\n';
     user += 'New fragment' + (endsSentence ? ' (ends the sentence)' : '') + ': ' + fragment;
     return [
-      { role: 'system', content: CHUNK_PROMPT },
+      { role: 'system', content: CHUNK_PROMPT + glossaryLine(glossary) },
       { role: 'user', content: user }
     ];
   }
 
-  function buildChunkBody(model, fragment, prevEn, prevLv, endsSentence) {
+  /* v7: ~10 sentences of context each way (500 chars) so the model can infer misheard words. */
+  var CONTEXT_CHARS = 500;
+
+  function buildChunkBody(model, fragment, prevEn, prevLv, endsSentence, glossary) {
     var body = {
       model: model,
-      messages: buildChunkMessages(fragment, tail(prevEn, 160), tail(prevLv, 160), endsSentence),
+      messages: buildChunkMessages(fragment, tail(prevEn, CONTEXT_CHARS), tail(prevLv, CONTEXT_CHARS), endsSentence, glossary),
       stream: true,
       max_completion_tokens: 120
     };
@@ -90,7 +102,8 @@
   /* Chunk size presets: minWords before a commit, words held back (recognizer may still
    * change the newest words), pause that commits everything, hard maximum. */
   var CHUNK_PRESETS = {
-    short:    { minWords: 4, holdBack: 1, pauseMs: 600, maxWords: 8 },
+    short:    { minWords: 3, holdBack: 1, pauseMs: 450, maxWords: 8 },   // v7: was 4 / 600 ms
+    v6short:  { minWords: 4, holdBack: 1, pauseMs: 600, maxWords: 8 },   // v6 baseline, for comparison tests
     medium:   { minWords: 7, holdBack: 2, pauseMs: 700, maxWords: 12 },
     sentence: { minWords: 1e9, holdBack: 0, pauseMs: 900, maxWords: 1e9 }
   };
@@ -136,15 +149,27 @@
     fast:   { base: 4.5, max: 9 }
   };
 
-  function revealRate(backlog, presetName) {
+  /*
+   * v7 elastic pacing: with a small queue (1 to 3 words), follow the rate at which translated
+   * words actually arrive (incoming, words/s) instead of the fixed base rate. The last
+   * buffered word is stretched a little, so the next phrase usually arrives before the
+   * screen runs dry: a steady flow instead of "burst, pause, burst".
+   * incoming 0 or unknown = old behaviour.
+   */
+  var MIN_FLOW = 1.6;
+  function revealRate(backlog, presetName, incoming) {
     var p = REVEAL_PRESETS[presetName] || REVEAL_PRESETS.normal;
+    if (incoming > 0 && backlog >= 1 && backlog <= 3) {
+      var k = backlog === 1 ? 0.8 : backlog === 2 ? 1.0 : 1.15;
+      return Math.max(MIN_FLOW, Math.min(p.base, incoming * k));
+    }
     var extra = backlog > 4 ? (backlog - 4) * 0.35 : 0;
     return Math.min(p.max, p.base + extra);
   }
 
   /* Delay (ms) before the next word. A short breath after a sentence end when not behind. */
-  function revealDelay(backlog, presetName, lastWord) {
-    var d = 1000 / revealRate(backlog, presetName);
+  function revealDelay(backlog, presetName, lastWord, incoming) {
+    var d = 1000 / revealRate(backlog, presetName, incoming);
     if (backlog < 4 && /[.!?]["')]*$/.test(lastWord || '')) d += 250;
     return Math.round(d);
   }
@@ -155,6 +180,88 @@
     var w = t.split(/\s+/).filter(Boolean);
     if (!done && w.length && !/\s$/.test(t)) w.pop(); // last token may be half a word
     return w;
+  }
+
+  /* ---------- Context correction (v7) ----------
+   * A second, silent pass: once a few more words have been spoken, a phrase already on
+   * screen is re-checked with what came before AND after it. The screen is only changed
+   * when the corrected Latvian differs meaningfully. */
+  var CORRECT_PROMPT =
+    'You are the editor of live English to Latvian meeting subtitles. The English comes from ' +
+    'automatic speech recognition and contains misheard words (homophones, split or merged words, ' +
+    'mangled names and jargon); the Latvian TARGET was translated in a hurry from a short fragment. ' +
+    'Using the conversation before and after it, the glossary and any recognition alternatives, ' +
+    'decide what the speaker really meant and give the best natural, logical Latvian for the TARGET ' +
+    'part only (do not include the before/after text). Remove or fix words that make no sense. ' +
+    'Keep it as close to the existing Latvian as possible: change only what is wrong or illogical. ' +
+    'Never use em dashes. Answer with JSON only: {"lv": "<Latvian for TARGET>", "reason": "<few words, English>"}.';
+
+  function buildCorrectionBody(model, o) {
+    var user =
+      (o.beforeEn ? 'BEFORE (English): ' + tail(o.beforeEn, 600) + '\n' : '') +
+      (o.beforeLv ? 'BEFORE (Latvian, already shown): ' + tail(o.beforeLv, 600) + '\n' : '') +
+      'TARGET (English, as recognised): ' + o.targetEn + '\n' +
+      (o.alts && o.alts.length ? 'Recognition alternatives for this sentence: ' + o.alts.join(' | ') + '\n' : '') +
+      'TARGET (Latvian, shown now): ' + o.targetLv + '\n' +
+      (o.afterEn ? 'AFTER (English, spoken next): ' + o.afterEn.slice(0, 400) + '\n' : '');
+    var body = {
+      model: model,
+      messages: [
+        { role: 'system', content: CORRECT_PROMPT + glossaryLine(o.glossary) },
+        { role: 'user', content: user }
+      ],
+      response_format: { type: 'json_object' },
+      max_completion_tokens: 300
+    };
+    if (/^(gpt-5|o\d)/i.test(model)) body.reasoning_effort = 'minimal';
+    else body.temperature = 0;
+    return body;
+  }
+
+  /* Accepts the JSON answer (or a bare string); returns the Latvian or '' if unusable. */
+  function parseCorrection(text) {
+    var t = (text || '').trim();
+    if (!t) return '';
+    try {
+      var j = JSON.parse(t);
+      return typeof j.lv === 'string' ? j.lv.trim() : '';
+    } catch (e) {
+      var m = t.match(/"lv"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      return m ? JSON.parse('"' + m[1] + '"').trim() : '';
+    }
+  }
+
+  function normWords(s) {
+    return (s || '').toLowerCase().replace(/[.,!?;:"'()«»„“”]/g, ' ').split(/\s+/).filter(Boolean);
+  }
+
+  /* Word-level edit distance. */
+  function wordDistance(a, b) {
+    var m = a.length, n = b.length, prev = [], cur, i, j;
+    for (j = 0; j <= n; j++) prev[j] = j;
+    for (i = 1; i <= m; i++) {
+      cur = [i];
+      for (j = 1; j <= n; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[n];
+  }
+
+  /*
+   * Is the correction worth moving text on screen? Not for punctuation, capitalisation or
+   * a single tiny word; yes for any changed content word or 2+ changed words.
+   */
+  function meaningfulChange(oldLv, newLv) {
+    var a = normWords(oldLv), b = normWords(newLv);
+    if (!b.length) return false;
+    var d = wordDistance(a, b);
+    if (d === 0) return false;
+    if (d >= 2) return true;
+    var changed = a.filter(function (w) { return b.indexOf(w) < 0; })
+      .concat(b.filter(function (w) { return a.indexOf(w) < 0; }));
+    return changed.some(function (w) { return w.length >= 4; });
   }
 
   /* ---------- Transcript (v5) ----------
@@ -235,6 +342,7 @@
     var rows = recs.map(function (r) {
       return '<section><time>' + formatOffset(r.t) + '</time><p class="lv">' +
         escapeHtml(capFirst((r.lv || '').trim()) || '[nav iztulkots]') + '</p>' +
+        (r.draft && r.draft !== r.lv ? '<p class="draft">Pirmais variants: ' + escapeHtml(r.draft.trim()) + '</p>' : '') +
         (withEn ? '<p class="en">' + escapeHtml((r.en || '').trim()) + '</p>' : '') + '</section>';
     }).join('\n');
     return '<!doctype html>\n<html lang="lv"><head><meta charset="utf-8">' +
@@ -245,7 +353,7 @@
       'body{margin:0;padding:16px;background:var(--bg);color:var(--fg);font:18px/1.5 system-ui,sans-serif;max-width:760px}' +
       'h1{font-size:22px;margin:0 0 4px}.meta{color:var(--dim);margin:0 0 16px}' +
       'section{border-top:1px solid var(--line);padding:10px 0}time{color:var(--dim);font-size:14px}' +
-      '.lv{margin:2px 0;font-weight:600}.en{margin:2px 0;color:var(--dim)}' +
+      '.lv{margin:2px 0;font-weight:600}.en{margin:2px 0;color:var(--dim)}.draft{margin:2px 0;color:var(--dim);font-size:14px;text-decoration:line-through}' +
       '</style></head><body>\n<h1>' + escapeHtml(title) + '</h1>\n<p class="meta">Ilgums: ' +
       formatDuration(st.durationMs) + ', ' + plural(st.count, 'runas daļa', 'runas daļas') + '</p>\n' + rows + '\n</body></html>\n';
   }
@@ -398,6 +506,11 @@
   }
 
   root.TCore = {
+    CORRECT_PROMPT: CORRECT_PROMPT,
+    buildCorrectionBody: buildCorrectionBody,
+    parseCorrection: parseCorrection,
+    meaningfulChange: meaningfulChange,
+    wordDistance: wordDistance,
     plural: plural,
     formatOffset: formatOffset,
     formatDateTime: formatDateTime,

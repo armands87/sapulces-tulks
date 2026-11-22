@@ -15,7 +15,8 @@
   var DEFAULTS = {
     v: SETTINGS_VERSION, apiKey: '', model: 'gpt-4.1-mini', engine: 'openai',
     showEn: false, theme: 'dark', size: 40, lines: 7, capLines: 7,
-    mode: 'captions', chunk: 'short', reveal: 'normal'
+    mode: 'captions', chunk: 'short', reveal: 'normal',
+    glossary: '', correct: true, corrModel: 'gpt-4.1-mini'
   };
   var S = load();
   function load() {
@@ -34,7 +35,10 @@
   function save() {
     try { localStorage.setItem('tulks.settings', JSON.stringify(S)); } catch (e) {}
   }
-  function preset() { return C.CHUNK_PRESETS[S.chunk] || C.CHUNK_PRESETS.short; }
+  function preset() {
+    if (window.__tulksLegacy && S.chunk === "short") return C.CHUNK_PRESETS.v6short; // test switch
+    return C.CHUNK_PRESETS[S.chunk] || C.CHUNK_PRESETS.short;
+  }
 
   /* ---------- Diagnostics ---------- */
   var diag = [];
@@ -242,18 +246,46 @@
   }
 
   /* Called whenever translated text arrives. Starts the reveal loop if it is idle. */
+  /* v7: how fast translated words actually arrive (words/s over the last 8 s). */
+  var arrivals = [];
+  function noteAvailable(c) {
+    var n = wordsOf(c).length;
+    if (n > (c.availSeen || 0)) { arrivals.push([Date.now(), n - (c.availSeen || 0)]); c.availSeen = n; }
+  }
+  function incomingRate() {
+    if (window.__tulksLegacy) return 0; // test switch: v6 pacing for before/after measurements
+    var now = Date.now();
+    while (arrivals.length && now - arrivals[0][0] > 8000) arrivals.shift();
+    var sum = 0;
+    for (var i = 0; i < arrivals.length; i++) sum += arrivals[i][1];
+    if (sum < 3) return 0;
+    return sum / (Math.max(2000, now - arrivals[0][0]) / 1000);
+  }
+
   function poke() {
     if (!revealTimer) pump();
     updateLag();
+    setAwaiting();
   }
 
   function pump() {
     revealTimer = null;
-    if (!revealNext()) { updateLag(); return; }
+    if (!revealNext()) { updateLag(); setAwaiting(); return; }
     var b = backlog();
-    if (b === 0 && !hasPendingWork()) { updateLag(); return; }
-    revealTimer = setTimeout(pump, C.revealDelay(b, S.reveal, lastRevealed));
+    if (b === 0 && !hasPendingWork()) { updateLag(); setAwaiting(); return; }
+    revealTimer = setTimeout(pump, C.revealDelay(b, S.reveal, lastRevealed, incomingRate()));
     updateLag();
+    setAwaiting();
+  }
+
+  /* "Still translating" indicator: the cursor breathes instead of the screen looking frozen. */
+  var awaitingTimer = null;
+  function setAwaiting() {
+    var waiting = running && backlog() === 0 &&
+      (hasPendingWork() || (utter && utter.words.length > utter.committed));
+    clearTimeout(awaitingTimer);
+    if (!waiting) { document.body.classList.remove('awaiting'); return; }
+    awaitingTimer = setTimeout(function () { document.body.classList.add('awaiting'); }, 350);
   }
 
   function hasPendingWork() {
@@ -376,7 +408,7 @@
   /* ---------- Translation ---------- */
   var chromeTranslator = null;
   var inflight = 0, lastApiAt = 0;
-  var HEDGE_MS = 3000;
+  var HEDGE_MS = 2500;
 
   function hasKey() { return S.apiKey && S.apiKey.trim().length > 20; }
 
@@ -463,7 +495,7 @@
 
   function contextBefore(c) {
     var en = [], lv = [];
-    for (var i = Math.max(0, c.index - 4); i < c.index; i++) {
+    for (var i = Math.max(0, c.index - 24); i < c.index; i++) { // cut to ~500 chars in core
       en.push(chunks[i].en);
       if (chunks[i].lv) lv.push(chunks[i].lv);
     }
@@ -477,7 +509,7 @@
    */
   function translateChunk(c, attempt) {
     var ctx = contextBefore(c);
-    var body = C.buildChunkBody(S.model || DEFAULTS.model, c.en, ctx.en, ctx.lv, c.endsSentence);
+    var body = C.buildChunkBody(S.model || DEFAULTS.model, c.en, ctx.en, ctx.lv, c.endsSentence, S.glossary);
     var owner = null, pending = 0, finished = false, lastErr = null, ctrls = {}, hedge = null;
 
     function onDelta(tag, partial) {
@@ -493,6 +525,7 @@
       }
       if (owner !== tag) return;
       c.lv = partial;
+      noteAvailable(c);
       poke();
     }
     function launch(tag) {
@@ -518,9 +551,13 @@
       c.lv = full || c.lv;
       c.done = true;
       if (!c.lv) c.failed = true;
+      c.draftLv = c.lv;
+      c.doneAt = Date.now();
+      noteAvailable(c);
       clearError(false);
       syncRecord(c.seg);
       poke();
+      scheduleCorrection();
     }
     function fail(e) {
       finished = true; clearTimeout(hedge);
@@ -543,6 +580,130 @@
         if (!finished && owner === null) { log('hedge #' + c.index); launch('b'); }
       }, HEDGE_MS);
     }
+  }
+
+  /* ---------- Context correction (v7) ----------
+   * Groups of ~8+ English words are re-checked once the following words are known (or
+   * 2.5 s have passed). The screen changes only if the Latvian differs meaningfully, the
+   * line is fully shown and still visible, and the user is not scrolled back reading. */
+  var corrIdx = 0, corrBusy = 0, corrTimer = null;
+  var corrStats = { sent: 0, changed: 0, kept: 0, failed: 0, offscreen: 0, last: [] };
+  var CORR_MIN_WORDS = 8, CORR_WAIT_MS = 2500;
+
+  function wc(s) { return (s || '').split(/\s+/).filter(Boolean).length; }
+
+  function scheduleCorrection(ms) {
+    clearTimeout(corrTimer);
+    corrTimer = setTimeout(runCorrection, ms == null ? 60 : ms);
+  }
+
+  function runCorrection() {
+    if (!S.correct || S.engine !== 'openai' || !hasKey()) return;
+    if (corrBusy >= 2) { scheduleCorrection(500); return; }
+    while (corrIdx < chunks.length && (chunks[corrIdx].failed || chunks[corrIdx].seg.store !== store)) corrIdx++;
+    if (corrIdx >= chunks.length) return;
+    var seg = chunks[corrIdx].seg, group = [], words = 0;
+    for (var i = corrIdx; i < chunks.length; i++) {
+      var c = chunks[i];
+      if (c.seg !== seg || c.failed) break;
+      if (!c.done) return; // wait: finish() schedules us again
+      group.push(c); words += wc(c.en);
+      if (words >= CORR_MIN_WORDS) break;
+    }
+    if (!group.length) { corrIdx++; scheduleCorrection(); return; }
+    var last = group[group.length - 1];
+    var segClosed = seg.endedAt && seg.chunks[seg.chunks.length - 1] === last;
+    if (words < CORR_MIN_WORDS && !segClosed) return; // more words of this sentence will come
+    var after = [], afterWords = 0;
+    for (var j = last.index + 1; j < chunks.length && afterWords < 25; j++) { after.push(chunks[j].en); afterWords += wc(chunks[j].en); }
+    var lastDone = Math.max.apply(null, group.map(function (g) { return g.doneAt || 0; }));
+    if (afterWords < 3 && Date.now() - lastDone < CORR_WAIT_MS) { scheduleCorrection(700); return; }
+    corrIdx = last.index + 1;
+    sendCorrection(group, after.join(' '));
+    scheduleCorrection();
+  }
+
+  /* Non-streamed JSON request (corrections are not time critical). */
+  function openaiJson(body, timeoutMs) {
+    var ctrl = new AbortController();
+    var t = setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, timeoutMs || 12000);
+    lastApiAt = Date.now();
+    return fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.apiKey.trim() },
+      body: JSON.stringify(body), signal: ctrl.signal
+    }).then(function (res) {
+      clearTimeout(t);
+      if (!res.ok) return res.text().then(function (x) { throw makeErr(res.status, x, false, body.model); });
+      return res.json();
+    }).then(function (j) {
+      return j.choices && j.choices[0] && j.choices[0].message ? j.choices[0].message.content || '' : '';
+    }, function (e) { clearTimeout(t); throw e; });
+  }
+
+  function sendCorrection(group, afterEn) {
+    var first = group[0], seg = first.seg;
+    var before = { en: [], lv: [] };
+    for (var i = Math.max(0, first.index - 24); i < first.index; i++) {
+      before.en.push(chunks[i].en); if (chunks[i].lv) before.lv.push(chunks[i].lv);
+    }
+    var targetLv = group.map(function (c) { return c.lv; }).join(' ').trim();
+    var o = {
+      glossary: S.glossary, beforeEn: before.en.join(' '), beforeLv: before.lv.join(' '),
+      targetEn: group.map(function (c) { return c.en; }).join(' '), targetLv: targetLv,
+      afterEn: afterEn, alts: seg.endedAt && seg.alts ? seg.alts : null
+    };
+    corrBusy++; corrStats.sent++;
+    openaiJson(C.buildCorrectionBody(S.corrModel || DEFAULTS.corrModel, o)).then(function (text) {
+      var lv = C.parseCorrection(text);
+      if (!lv || !C.meaningfulChange(targetLv, lv)) { corrStats.kept++; return; }
+      applyCorrection(group, lv, targetLv, 0);
+    }).catch(function (e) {
+      corrStats.failed++;
+      log('correction failed ' + (e && e.status));
+    }).then(function () { corrBusy--; });
+  }
+
+  function onScreen(el) {
+    if (!el || !el.isConnected) return false;
+    if (S.mode !== 'captions') return el.offsetParent !== null;
+    var r = el.getBoundingClientRect(), cr = cap.getBoundingClientRect();
+    return r.bottom > cr.top + 4 && r.top < cr.bottom - 4;
+  }
+
+  function applyCorrection(group, lv, oldLv, tries) {
+    var seg = group[0].seg;
+    if (seg.store !== store) return; // conversation was cleared meanwhile
+    // never change words that are still being revealed: wait for the revealer (max ~5 s)
+    var revealing = group.some(function (c) { return c.revealed < wordsOf(c).length; });
+    if (revealing && tries < 10) { setTimeout(function () { applyCorrection(group, lv, oldLv, tries + 1); }, 500); return; }
+    var firstEl = group[0].el;
+    if (firstEl && /^[A-ZĀČĒĢĪĶĻŅŠŪŽ]/.test(firstEl.textContent)) lv = lv.charAt(0).toUpperCase() + lv.slice(1);
+    // data first: the transcript always keeps the corrected text (and the first draft)
+    if (seg.rec && seg.rec.draft == null) seg.rec.draft = seg.chunks.map(function (c) { return c.lv; }).join(' ').trim();
+    group.forEach(function (c, k) {
+      c.lv = k === 0 ? lv : '';
+      c.corrected = true;
+      c.revealed = wordsOf(c).length;
+    });
+    syncRecord(seg);
+    corrStats.changed++;
+    corrStats.last.push(oldLv + '  →  ' + lv);
+    if (corrStats.last.length > 8) corrStats.last.shift();
+    log('fix #' + group[0].index + ': ' + oldLv + ' -> ' + lv);
+    // screen: only if visible and the user is following live; otherwise leave the text still
+    var els = group.map(function (c) { return c.el; }).filter(Boolean);
+    if (!els.length || frozen || !els.some(onScreen)) { corrStats.offscreen++; return; }
+    els.forEach(function (el) { el.classList.add('fixing'); });
+    setTimeout(function () {
+      els.forEach(function (el, k) {
+        el.textContent = k === 0 ? lv : '';
+        el.classList.remove('fixing');
+      });
+      els[0].classList.add('fixed');
+      layout(false);
+    }, 180);
+    if (window.__tulks) window.__tulks.fixLog.push({ at: Date.now(), index: group[0].index, from: oldLv, to: lv });
   }
 
   /* ---------- Chunker: turns recognizer words into fragments ---------- */
@@ -592,8 +753,9 @@
     }, p.pauseMs);
   }
 
-  function onFinalText(text) {
+  function onFinalText(text, alts) {
     setWords(text);
+    if (alts && alts.length && utter) utter.seg.alts = alts;
     runChunker('final');
     endUtter();
   }
@@ -607,7 +769,9 @@
         var ri = store.records.indexOf(utter.seg.rec);
         if (ri >= 0) store.records.splice(ri, 1);
       }
+      utter.seg.endedAt = Date.now();
       lastSegEndAt = Date.now();
+      scheduleCorrection();
     }
     utter = null;
   }
@@ -628,7 +792,7 @@
     r.lang = 'en-US';
     r.continuous = true;
     r.interimResults = true;
-    r.maxAlternatives = 1;
+    r.maxAlternatives = 3; // v7: alternatives are passed to the correction pass as hints
     function mine() { return myGen === gen; }
     function touch() { if (mine()) lastEventAt = Date.now(); }
     r.onaudiostart = touch;
@@ -722,7 +886,9 @@
       if (r.isFinal) {
         var part = C.newFinalPart(lastFinalRaw, t);
         lastFinalRaw = t.trim();
-        if (part) onFinalText(part);
+        var alts = [];
+        for (var a = 1; a < r.length; a++) if (r[a] && r[a].transcript) alts.push(r[a].transcript.trim());
+        if (part) onFinalText(part, alts);
       } else interimText += t;
     }
     interimText = C.newFinalPart(lastFinalRaw, interimText.trim());
@@ -860,6 +1026,10 @@
     setRadio('mode', S.mode);
     setRadio('chunk', S.chunk);
     setRadio('reveal', S.reveal);
+    setRadio('correct', S.correct ? 'on' : 'off');
+    $('corrModel').value = S.corrModel;
+    $('glossary2').value = S.glossary;
+    $('corrModelField').hidden = !S.correct;
     $('apiKey').value = S.apiKey;
     $('model').value = S.model;
     $('showEn').checked = !!S.showEn;
@@ -881,6 +1051,10 @@
     S.mode = getRadio('mode') || S.mode;
     S.chunk = getRadio('chunk') || S.chunk;
     S.reveal = getRadio('reveal') || S.reveal;
+    if (getRadio('correct')) S.correct = getRadio('correct') === 'on';
+    S.corrModel = $('corrModel').value.trim() || DEFAULTS.corrModel;
+    setGlossary($('glossary2').value);
+    $('corrModelField').hidden = !S.correct;
     S.apiKey = $('apiKey').value.trim();
     S.model = $('model').value.trim() || DEFAULTS.model;
     S.showEn = $('showEn').checked;
@@ -893,6 +1067,16 @@
     save(); applyView();
   }
   $('openSettings').onclick = openSettings;
+
+  /* Meeting topic / glossary: one value, editable on the start screen and in settings. */
+  function setGlossary(v) {
+    S.glossary = (v || '').slice(0, 600);
+    if ($('glossary').value !== S.glossary) $('glossary').value = S.glossary;
+    if ($('glossary2').value !== S.glossary) $('glossary2').value = S.glossary;
+    save();
+  }
+  $('glossary').value = S.glossary;
+  $('glossary').addEventListener('input', function (e) { setGlossary(e.target.value); });
   $('lines').oninput = function (e) { $('linesVal').textContent = e.target.value; };
   $('capLines').oninput = function (e) { $('capLinesVal').textContent = e.target.value; };
   $('sizeRange').oninput = function (e) { $('sizeVal').textContent = e.target.value; };
@@ -961,6 +1145,11 @@
         '  (+ Google runas atpazīšana, ap 300 līdz 700 ms, nav izmērāma)\n' +
         '  rindā gaida: ' + backlog() + ' vārdi\n\n'
         : 'Aizture: vēl nav datu\n\n') +
+      'Labošana pēc konteksta: ' + (S.correct ? 'ieslēgta (' + S.corrModel + ')' : 'izslēgta') +
+      ', pārbaudīts ' + corrStats.sent + ', labots ' + corrStats.changed +
+      ' (no tiem ārpus ekrāna ' + corrStats.offscreen + '), bez izmaiņām ' + corrStats.kept +
+      ', kļūdas ' + corrStats.failed + '\n' +
+      (corrStats.last.length ? corrStats.last.slice().reverse().map(function (x) { return '  ' + x; }).join('\n') + '\n' : '') + '\n' +
       'running=' + running + ' active=' + active + ' starting=' + starting +
       ' inflight=' + inflight + ' fails=' + fails + ' wakeLock=' + !!wakeLock +
       ' model=' + S.model + ' chunk=' + S.chunk + ' reveal=' + S.reveal + '\n' +
@@ -1119,6 +1308,7 @@
   window.__tulks = {
     latencySummary: latencySummary, chunks: chunks, revealLog: [],
     backlog: backlog, isFrozen: function () { return frozen; }, freeze: freeze,
+    fixLog: [], corrStats: function () { return corrStats; },
     store: function () { return store; }, isDirty: function () { return dirty; }, persistNow: persistNow
   };
 })();
