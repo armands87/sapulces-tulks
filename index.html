@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#000000">
+  <meta name="color-scheme" content="dark light">
   <meta name="mobile-web-app-capable" content="yes">
   <title>Sapulces tulks</title>
   <link rel="manifest" href="manifest.json">
@@ -13,157 +14,215 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body class="mode-captions">
-  <header id="bar">
-    <button id="openSave" class="save-btn" aria-label="Saglabāt sarunu">Saglabāt</button>
-    <div class="tools">
-      <button id="smaller" aria-label="Mazāks teksts">A−</button>
-      <button id="bigger" aria-label="Lielāks teksts">A+</button>
-      <button id="toggleMode" aria-label="Režīms">CC</button>
-      <button id="toggleEn" aria-label="Rādīt angļu tekstu">EN</button>
-      <button id="toggleTheme" aria-label="Mainīt fonu">◐</button>
-      <button id="openSettings" aria-label="Iestatījumi">⚙</button>
+  <!-- Icon set (inline, no network) -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-mic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11a7 7 0 0 0 14 0M12 18v3"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5" fill="currentColor"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/></symbol>
+    <symbol id="i-gear" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z"/><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M19.4 13.5a7.6 7.6 0 0 0 0-3l2-1.5-2-3.4-2.4 1a7.5 7.5 0 0 0-2.6-1.5L14 2.6h-4l-.4 2.5A7.5 7.5 0 0 0 7 6.6l-2.4-1-2 3.4 2 1.5a7.6 7.6 0 0 0 0 3l-2 1.5 2 3.4 2.4-1a7.5 7.5 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a7.5 7.5 0 0 0 2.6-1.5l2.4 1 2-3.4z"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 12h12"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6 12h12M12 6v12"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6 6 18"/></symbol>
+  </svg>
+
+  <!-- Top line: tiny status (always), settings icon (hidden while listening calmly) -->
+  <header id="top">
+    <div class="status-line">
+      <span id="status" class="status off" aria-live="polite">Gatavs</span>
+      <span id="lag" class="lag" hidden></span>
     </div>
+    <button id="openSettings" class="icon-btn" aria-label="Iestatījumi"><svg><use href="#i-gear"/></svg></button>
   </header>
 
-  <div id="errorBar" class="error-bar" role="alert" hidden>
+  <div id="errorBar" class="toast" role="alert" hidden>
     <span id="errorText"></span>
-    <button id="errorClose" aria-label="Aizvērt kļūdas ziņu">×</button>
+    <button id="errorClose" class="icon-btn small" aria-label="Aizvērt"><svg><use href="#i-close"/></svg></button>
   </div>
 
-  <div id="restoreBar" class="restore-bar" hidden>
-    <span id="restoreText"></span>
-    <div class="actions">
-      <button id="restoreYes" class="primary">Atjaunot iepriekšējo sarunu</button>
-      <button id="restoreNo">Sākt jaunu</button>
+  <!-- Idle start screen -->
+  <section id="startScreen" aria-label="Sākums">
+    <div id="restoreBar" class="card" hidden>
+      <p id="restoreText"></p>
+      <div class="row-btns">
+        <button id="restoreYes" class="btn tonal">Atjaunot</button>
+        <button id="restoreNo" class="btn ghost">Sākt jaunu</button>
+      </div>
     </div>
-  </div>
+    <div class="start-center">
+      <button id="startBtn" class="start-btn" aria-label="Sākt klausīties">
+        <svg><use href="#i-mic"/></svg>
+      </button>
+      <p class="start-label">Sākt</p>
+      <p id="startHint" class="start-hint">Novieto telefonu pie skaļruņa.<br>Angļu runa parādīsies latviski.</p>
+      <button id="keyHint" class="btn tonal" hidden>Pievienot OpenAI atslēgu</button>
+    </div>
+  </section>
 
+  <!-- Captions -->
   <main id="feed">
-    <p id="hint" class="hint">Nospied <b>Sākt</b> un novieto telefonu pie skaļruņa.<br>Pirmajā reizē atver ⚙ un ielīmē OpenAI atslēgu.</p>
     <div id="capWrap">
       <div id="cap"><div id="capText" aria-live="polite"><span id="caret" class="caret" aria-hidden="true"></span></div></div>
-      <button id="backToLive" class="back-live" hidden>Atpakaļ uz tiešraidi</button>
     </div>
     <div id="liveEn" aria-hidden="true"></div>
   </main>
 
-  <footer>
-    <div class="footinfo">
-      <span id="status" class="status off" aria-live="polite">Gaida</span>
-      <span id="lag" class="lag" hidden></span>
-    </div>
-    <button id="startStop" class="big start">Sākt</button>
-  </footer>
+  <button id="backToLive" class="back-live" hidden>Atpakaļ uz tiešraidi</button>
 
-  <dialog id="saveDlg">
-    <form method="dialog">
-      <h2>Saglabāt sarunu</h2>
-      <p id="saveInfo" class="note"></p>
-      <fieldset>
-        <legend>Saturs</legend>
-        <label class="row"><input type="radio" name="saveLang" value="lven" checked> Latviski + angliski</label>
-        <label class="row"><input type="radio" name="saveLang" value="lv"> Tikai latviski</label>
-      </fieldset>
-      <fieldset>
-        <legend>Formāts</legend>
-        <label class="row"><input type="radio" name="saveFmt" value="txt" checked> Teksts (.txt)</label>
-        <label class="row"><input type="radio" name="saveFmt" value="html"> Lapa telefonam (.html)</label>
-      </fieldset>
-      <div class="actions">
-        <button type="button" id="saveShare" class="primary big-action">Saglabāt / dalīties</button>
+  <!-- Bottom dock: only the essentials, auto-hides while listening -->
+  <nav id="dock" aria-label="Vadība">
+    <div class="size-ctl" role="group" aria-label="Teksta izmērs">
+      <button id="smaller" class="icon-btn" aria-label="Mazāks teksts"><span class="aa small">A</span></button>
+      <button id="bigger" class="icon-btn" aria-label="Lielāks teksts"><span class="aa">A</span></button>
+    </div>
+    <button id="openSave" class="dock-btn" aria-label="Saglabāt sarunu"><svg><use href="#i-save"/></svg><span>Saglabāt</span></button>
+    <button id="stopBtn" class="primary-btn stop"><svg><use href="#i-stop"/></svg><span>Apturēt</span></button>
+    <button id="resumeBtn" class="primary-btn"><svg><use href="#i-mic"/></svg><span>Turpināt</span></button>
+  </nav>
+
+  <!-- Settings sheet -->
+  <dialog id="settings" class="sheet">
+    <form method="dialog" id="settingsForm">
+      <div class="sheet-head">
+        <h2>Iestatījumi</h2>
+        <button value="close" class="btn tonal small-btn">Gatavs</button>
       </div>
-      <div class="actions">
-        <button type="button" id="saveDownload">Lejupielādēt</button>
-        <button type="button" id="saveCopy">Kopēt</button>
-      </div>
-      <p id="saveResult" class="note" aria-live="polite"></p>
-      <hr>
-      <div class="actions">
-        <button type="button" id="newConv" class="danger">Jauna saruna</button>
-        <button value="close" class="primary">Aizvērt</button>
-      </div>
-      <p class="note">Saruna tiek glabāta šajā telefonā, līdz nospied "Jauna saruna". Arī pēc lapas pārlādes to var atjaunot.</p>
+
+      <section class="group">
+        <h3>Izskats</h3>
+        <div class="field">
+          <span class="label">Tēma</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="theme" value="dark"><span>Tumšā</span></label>
+            <label><input type="radio" name="theme" value="light"><span>Gaišā</span></label>
+            <label><input type="radio" name="theme" value="auto"><span>Automātiski</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">Teksta izmērs <output id="sizeVal"></output></span>
+          <input id="sizeRange" type="range" min="24" max="72" step="2">
+        </div>
+        <div class="field">
+          <span class="label">Rādīšana</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="mode" value="captions"><span>Subtitri</span></label>
+            <label><input type="radio" name="mode" value="focus"><span>Tikai teikums</span></label>
+            <label><input type="radio" name="mode" value="history"><span>Vēsture</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <span class="label">Redzamās rindas <output id="capLinesVal"></output></span>
+          <input id="capLines" type="range" min="4" max="12" step="1">
+        </div>
+        <label class="switch-row">
+          <span>Rādīt angļu oriģinālu<small>Bāla rindiņa zem tulkojuma</small></span>
+          <input id="showEn" type="checkbox" class="switch">
+        </label>
+      </section>
+
+      <section class="group">
+        <h3>Teksta plūsma</h3>
+        <div class="field">
+          <span class="label">Parādīšanās ātrums</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="reveal" value="slow"><span>Lēnāk</span></label>
+            <label><input type="radio" name="reveal" value="normal"><span>Normāli</span></label>
+            <label><input type="radio" name="reveal" value="fast"><span>Ātrāk</span></label>
+          </div>
+          <small class="hint">Teksts parādās vienmērīgi, vārdu pa vārdam. Ja ritini uz augšu, skats apstājas.</small>
+        </div>
+        <div class="field">
+          <span class="label">Tulkošana pa</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="chunk" value="short"><span>Īsām frāzēm</span></label>
+            <label><input type="radio" name="chunk" value="medium"><span>Garākām</span></label>
+            <label><input type="radio" name="chunk" value="sentence"><span>Teikumiem</span></label>
+          </div>
+          <small class="hint">Īsas frāzes: ātrāk. Teikumi: labāka valoda, bet lēnāk.</small>
+        </div>
+        <div class="field" id="linesField">
+          <span class="label">Vēstures režīmā teikumi <output id="linesVal"></output></span>
+          <input id="lines" type="range" min="3" max="12" step="1">
+        </div>
+      </section>
+
+      <section class="group">
+        <h3>Tulkošana</h3>
+        <div class="field">
+          <span class="label">Tulkotājs</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="engine" value="openai"><span>OpenAI</span></label>
+            <label><input type="radio" name="engine" value="chrome"><span>Chrome (bezmaksas)</span></label>
+          </div>
+          <small id="chromeNote" class="hint"></small>
+        </div>
+        <label class="field">
+          <span class="label">OpenAI atslēga</span>
+          <input id="apiKey" class="text" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
+          <small class="hint">Glabājas tikai šajā telefonā un tiek sūtīta tikai uz api.openai.com.</small>
+        </label>
+        <label class="field">
+          <span class="label">Modelis</span>
+          <input id="model" class="text" list="models" spellcheck="false">
+          <datalist id="models">
+            <option value="gpt-4.1-mini">
+            <option value="gpt-4.1-nano">
+            <option value="gpt-4o-mini">
+            <option value="gpt-5-nano">
+            <option value="gpt-5-mini">
+          </datalist>
+        </label>
+        <div class="row-btns">
+          <button type="button" id="testKey" class="btn tonal">Pārbaudīt</button>
+          <button type="button" id="speedTest" class="btn tonal">Ātruma tests</button>
+        </div>
+        <p id="testResult" class="result" aria-live="polite"></p>
+      </section>
+
+      <section class="group">
+        <h3>Cits</h3>
+        <div class="list">
+          <button type="button" id="saveText" class="list-btn">Saglabāt sarunu</button>
+          <button type="button" id="fullscreen" class="list-btn">Pilnekrāns</button>
+          <button type="button" id="clearText" class="list-btn">Notīrīt ekrānu</button>
+          <button type="button" id="showDiag" class="list-btn">Diagnostika</button>
+        </div>
+        <pre id="diag" class="diag" hidden></pre>
+      </section>
     </form>
   </dialog>
 
-  <dialog id="settings">
-    <form method="dialog" id="settingsForm">
-      <h2>Iestatījumi</h2>
-
-      <label>Rādīšanas režīms
-        <select id="mode">
-          <option value="captions">Subtitri: nepārtraukts teksts, jaunākais izcelts (ieteicams)</option>
-          <option value="focus">Tikai pašreizējais teikums</option>
-          <option value="history">Visa vēsture, pašreizējais dzeltenā</option>
-        </select>
-      </label>
-
-      <label>Subtitru loga augstums (rindas): <span id="capLinesVal"></span>
-        <input id="capLines" type="range" min="4" max="12" step="1">
-      </label>
-
-      <label>Teksta parādīšanās ātrums
-        <select id="reveal">
-          <option value="slow">Lēnāk (~2,5 vārdi/s, līdz 5,5)</option>
-          <option value="normal">Normāli (~3,5 vārdi/s, līdz 7)</option>
-          <option value="fast">Ātrāk (~4,5 vārdi/s, līdz 9)</option>
-        </select>
-      </label>
-      <p class="note">Teksts parādās vārdu pa vārdam vienmērīgā tempā. Ja tulkojums atnāk lielā gabalā, temps tikai nedaudz paātrinās, nekas netiek izlaists. Pieskaries tekstam vai ritini uz augšu, lai apturētu skatu un pārlasītu.</p>
-
-      <label>Tulkošanas solis
-        <select id="chunk">
-          <option value="short">Īsas frāzes, ~4 vārdi (ātrākais)</option>
-          <option value="medium">Garākas frāzes, ~7 vārdi (nedaudz labāka valoda)</option>
-          <option value="sentence">Pa teikumiem (lēnākais, labākā valoda)</option>
-        </select>
-      </label>
-
-      <label>Tulkošanas veids
-        <select id="engine">
-          <option value="openai">OpenAI (labākā kvalitāte, maksas)</option>
-          <option value="chrome">Chrome iebūvētais tulkotājs (bezmaksas, zemāka kvalitāte)</option>
-        </select>
-      </label>
-      <p id="chromeNote" class="note"></p>
-
-      <label>OpenAI API atslēga
-        <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-...">
-      </label>
-      <p class="note">Atslēga glabājas tikai šajā telefonā (localStorage) un tiek sūtīta tikai uz api.openai.com.</p>
-
-      <label>Modelis
-        <input id="model" list="models" spellcheck="false">
-        <datalist id="models">
-          <option value="gpt-4.1-mini">
-          <option value="gpt-4.1-nano">
-          <option value="gpt-4o-mini">
-          <option value="gpt-5-nano">
-          <option value="gpt-5-mini">
-        </datalist>
-      </label>
-      <p class="note">Nospied "Ātruma tests": tas izmēra katra modeļa atbildes laiku tieši tavā telefonā un tīklā.</p>
-
-      <label class="row"><input id="showEn" type="checkbox"> Rādīt angļu oriģinālu (bāla rindiņa)</label>
-      <label class="row"><input id="lightTheme" type="checkbox"> Balts fons, melni burti</label>
-
-      <label>Vēstures režīmā redzamo teikumu skaits: <span id="linesVal"></span>
-        <input id="lines" type="range" min="3" max="12" step="1">
-      </label>
-
-      <div class="actions">
-        <button type="button" id="testKey">Pārbaudīt</button>
-        <button type="button" id="speedTest">Ātruma tests</button>
-        <button type="button" id="showDiag">Diagnostika</button>
+  <!-- Save sheet -->
+  <dialog id="saveDlg" class="sheet">
+    <form method="dialog">
+      <div class="sheet-head">
+        <h2>Saglabāt sarunu</h2>
+        <button value="close" class="icon-btn" aria-label="Aizvērt"><svg><use href="#i-close"/></svg></button>
       </div>
-      <p id="testResult" class="note"></p>
-      <pre id="diag" class="diag" hidden></pre>
-      <div class="actions">
-        <button type="button" id="saveText">Saglabāt sarunu…</button>
-        <button type="button" id="clearText">Notīrīt ekrānu</button>
-        <button type="button" id="fullscreen">Pilnekrāns</button>
-        <button value="close" class="primary">Gatavs</button>
+      <p id="saveInfo" class="meta"></p>
+      <div class="field">
+        <span class="label">Saturs</span>
+        <div class="segmented" role="radiogroup">
+          <label><input type="radio" name="saveLang" value="lven" checked><span>Latviski + angliski</span></label>
+          <label><input type="radio" name="saveLang" value="lv"><span>Tikai latviski</span></label>
+        </div>
       </div>
+      <div class="field">
+        <span class="label">Formāts</span>
+        <div class="segmented" role="radiogroup">
+          <label><input type="radio" name="saveFmt" value="txt" checked><span>Teksts</span></label>
+          <label><input type="radio" name="saveFmt" value="html"><span>Lapa telefonam</span></label>
+        </div>
+      </div>
+      <button type="button" id="saveShare" class="btn primary wide">Saglabāt vai nosūtīt</button>
+      <div class="row-btns">
+        <button type="button" id="saveDownload" class="btn tonal">Lejupielādēt</button>
+        <button type="button" id="saveCopy" class="btn tonal">Kopēt tekstu</button>
+      </div>
+      <p id="saveResult" class="result" aria-live="polite"></p>
+      <div class="divider"></div>
+      <button type="button" id="newConv" class="btn danger-ghost wide">Jauna saruna</button>
+      <small class="hint center">Saruna glabājas šajā telefonā, līdz sāc jaunu. Pēc pārlādes to var atjaunot.</small>
     </form>
   </dialog>
 

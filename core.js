@@ -183,6 +183,11 @@
       pad2(d.getHours()) + pad2(d.getMinutes()) + '.' + ext;
   }
 
+  /* Latvian count agreement: 1, 21, 31... take the singular (but 11 does not). */
+  function plural(n, one, many) {
+    return n + ' ' + (n % 10 === 1 && n % 100 !== 11 ? one : many);
+  }
+
   function capFirst(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
 
   /* Records that have something to show (empty segments are skipped). */
@@ -201,7 +206,7 @@
     var recs = usableRecords(session.records), st = transcriptStats(session);
     var out = ['Sapulces tulks: sarunas pieraksts',
       'Sākums: ' + formatDateTime(new Date(session.startedAt)),
-      'Ilgums: ' + formatDuration(st.durationMs) + ', ' + st.count + ' runas daļas',
+      'Ilgums: ' + formatDuration(st.durationMs) + ', ' + plural(st.count, 'runas daļa', 'runas daļas'),
       ''];
     recs.forEach(function (r) {
       var lv = capFirst((r.lv || '').trim()) || '[nav iztulkots]';
@@ -242,7 +247,7 @@
       'section{border-top:1px solid var(--line);padding:10px 0}time{color:var(--dim);font-size:14px}' +
       '.lv{margin:2px 0;font-weight:600}.en{margin:2px 0;color:var(--dim)}' +
       '</style></head><body>\n<h1>' + escapeHtml(title) + '</h1>\n<p class="meta">Ilgums: ' +
-      formatDuration(st.durationMs) + ', ' + st.count + ' runas daļas</p>\n' + rows + '\n</body></html>\n';
+      formatDuration(st.durationMs) + ', ' + plural(st.count, 'runas daļa', 'runas daļas') + '</p>\n' + rows + '\n</body></html>\n';
   }
 
   function median(arr) {
@@ -393,6 +398,7 @@
   }
 
   root.TCore = {
+    plural: plural,
     formatOffset: formatOffset,
     formatDateTime: formatDateTime,
     formatDuration: formatDuration,

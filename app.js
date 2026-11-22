@@ -11,20 +11,21 @@
   var $ = function (id) { return document.getElementById(id); };
 
   /* ---------- Settings (localStorage only) ---------- */
-  var SETTINGS_VERSION = 4;
+  var SETTINGS_VERSION = 6;
   var DEFAULTS = {
     v: SETTINGS_VERSION, apiKey: '', model: 'gpt-4.1-mini', engine: 'openai',
-    showEn: false, light: false, size: 40, lines: 7, capLines: 7,
+    showEn: false, theme: 'dark', size: 40, lines: 7, capLines: 7,
     mode: 'captions', chunk: 'short', reveal: 'normal'
   };
   var S = load();
   function load() {
     var s = {};
     try { s = JSON.parse(localStorage.getItem('tulks.settings') || '{}'); } catch (e) {}
-    if (s.v !== SETTINGS_VERSION) { // one-time migration to the v4 defaults
-      if (s.v !== 3) { delete s.mode; if (s.size && s.size > 48) delete s.size; }
-      delete s.interim; delete s.capLines;
-    }
+    // one-time migrations, oldest first
+    if (!s.v || s.v < 3) { delete s.mode; if (s.size && s.size > 48) delete s.size; }
+    if (!s.v || s.v < 4) { delete s.interim; delete s.capLines; }
+    if (!s.theme && 'light' in s) s.theme = s.light ? 'light' : 'dark';
+    delete s.light;
     var out = {};
     for (var k in DEFAULTS) out[k] = (k in s) ? s[k] : DEFAULTS[k];
     out.v = SETTINGS_VERSION;
@@ -51,24 +52,31 @@
 
   /* ---------- Elements ---------- */
   var feed = $('feed'), cap = $('cap'), capText = $('capText'), caret = $('caret'), liveEn = $('liveEn');
-  var statusEl = $('status'), lagEl = $('lag'), btn = $('startStop'), dlg = $('settings');
+  var statusEl = $('status'), lagEl = $('lag'), dlg = $('settings');
   var errorBar = $('errorBar'), errorText = $('errorText'), backBtn = $('backToLive');
   var MODES = ['captions', 'focus', 'history'];
-  var MODE_LABEL = { captions: 'CC', focus: '1', history: '≡' };
+  var prefersLight = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+
+  function isLight() {
+    return S.theme === 'light' || (S.theme === 'auto' && !!(prefersLight && prefersLight.matches));
+  }
 
   function applyView() {
     var root = document.documentElement.style;
     root.setProperty('--size', S.size + 'px');
     root.setProperty('--caplines', S.capLines);
     var b = document.body.classList;
-    b.toggle('light', !!S.light);
+    var light = isLight();
+    b.toggle('light', light);
     b.toggle('show-en', !!S.showEn);
     MODES.forEach(function (m) { b.toggle('mode-' + m, S.mode === m); });
-    $('toggleEn').classList.toggle('on', !!S.showEn);
-    $('toggleMode').textContent = MODE_LABEL[S.mode] || 'CC';
-    document.querySelector('meta[name=theme-color]').content = S.light ? '#ffffff' : '#000000';
+    document.querySelector('meta[name=theme-color]').content = light ? '#ffffff' : '#000000';
+    $('keyHint').hidden = !(S.engine === 'openai' && !hasKey());
     if (S.mode !== 'captions') unfreeze(false);
     layout(true);
+  }
+  if (prefersLight && prefersLight.addEventListener) {
+    prefersLight.addEventListener('change', function () { if (S.theme === 'auto') applyView(); });
   }
 
   /* ---------- Errors and status ---------- */
@@ -328,11 +336,12 @@
   }
   function updateBackBtn() {
     backBtn.hidden = false;
-    backBtn.textContent = 'Atpakaļ uz tiešraidi' + (newWhileFrozen ? ' · ' + newWhileFrozen + ' jauni vārdi' : '');
+    backBtn.textContent = 'Atpakaļ uz tiešraidi' + (newWhileFrozen ? ' · ' + C.plural(newWhileFrozen, 'jauns vārds', 'jauni vārdi') : '');
   }
   backBtn.onclick = function () { unfreeze(true); };
 
-  function onUserTouch() { userTouchAt = Date.now(); freeze(); }
+  // v6: a tap shows the controls; only scrolling up freezes the view
+  function onUserTouch() { userTouchAt = Date.now(); }
   cap.addEventListener('pointerdown', onUserTouch);
   cap.addEventListener('touchstart', onUserTouch, { passive: true });
   cap.addEventListener('wheel', onUserTouch, { passive: true });
@@ -723,7 +732,7 @@
   function updateStatus() {
     var text, kind;
     if (!SR) { text = 'Nav runas atpazīšanas'; kind = 'err'; }
-    else if (!running) { text = lastError && lastError.fatal ? 'Apturēts (kļūda)' : 'Apturēts'; kind = lastError && lastError.fatal ? 'err' : 'off'; }
+    else if (!running) { text = lastError && lastError.fatal ? 'Apturēts (kļūda)' : (document.body.classList.contains('started') ? 'Apturēts' : 'Gatavs'); kind = lastError && lastError.fatal ? 'err' : 'off'; }
     else if (document.hidden) { text = 'Fonā, apturēts'; kind = 'warn'; }
     else if (starting) { text = 'Ieslēdz mikrofonu…'; kind = 'warn'; }
     else if (!active) { text = 'Restartē…'; kind = 'warn'; }
@@ -776,7 +785,7 @@
     running = true; fails = 0; notAllowedCount = 0;
     log('START model=' + S.model + ' chunk=' + S.chunk + ' reveal=' + S.reveal + ' mode=' + S.mode);
     document.body.classList.add('running', 'started');
-    btn.textContent = 'Apturēt'; btn.className = 'big stop';
+    showControls();
     warm();
     lockScreen();
     startRec();
@@ -804,38 +813,60 @@
     setTimeout(function () { if (!running) { active = false; starting = false; updateStatus(); } }, 1500);
     unlockScreen();
     document.body.classList.remove('running');
-    btn.textContent = 'Sākt'; btn.className = 'big start';
+    showControls();
     updateStatus(); updateLag();
   }
 
-  btn.addEventListener('click', function () { running ? stop() : start(); });
+  $('startBtn').onclick = start;
+  $('resumeBtn').onclick = start;
+  $('stopBtn').onclick = stop;
+  $('keyHint').onclick = function () { openSettings(); $('apiKey').focus(); };
 
-  /* ---------- Toolbar ---------- */
-  function setSize(v) { S.size = Math.max(20, Math.min(110, v)); save(); applyView(); }
+  /* ---------- Controls: visible on tap, fade away while listening ---------- */
+  var CALM_AFTER = 4000, calmTimer = null;
+  function showControls() {
+    document.body.classList.remove('calm');
+    clearTimeout(calmTimer);
+    calmTimer = setTimeout(function () {
+      // only fade while listening, with nothing open and the view following live
+      if (running && !frozen && !dlg.open && !$('saveDlg').open) document.body.classList.add('calm');
+    }, CALM_AFTER);
+  }
+  feed.addEventListener('click', function () {
+    if (document.body.classList.contains('calm')) showControls();
+    else if (running) { clearTimeout(calmTimer); document.body.classList.add('calm'); }
+  });
+  $('dock').addEventListener('pointerdown', showControls);
+  $('top').addEventListener('pointerdown', showControls);
+
+  /* ---------- Text size (dock) ---------- */
+  function setSize(v) { S.size = Math.max(24, Math.min(72, v)); save(); applyView(); }
   $('smaller').onclick = function () { setSize(S.size - 4); };
   $('bigger').onclick = function () { setSize(S.size + 4); };
-  $('toggleEn').onclick = function () { S.showEn = !S.showEn; save(); applyView(); };
-  $('toggleTheme').onclick = function () { S.light = !S.light; save(); applyView(); };
-  $('toggleMode').onclick = function () {
-    S.mode = MODES[(MODES.indexOf(S.mode) + 1) % MODES.length]; save(); applyView();
-  };
   $('fullscreen').onclick = function () {
     if (document.fullscreenElement) document.exitFullscreen();
     else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(function () {});
   };
 
   /* ---------- Settings dialog ---------- */
+  function getRadio(name) { var el = document.querySelector('input[name=' + name + ']:checked'); return el ? el.value : ''; }
+  function setRadio(name, v) {
+    var el = document.querySelector('input[name=' + name + '][value="' + v + '"]');
+    if (el) el.checked = true;
+  }
   function openSettings() {
-    $('engine').value = S.engine;
+    setRadio('engine', S.engine);
+    setRadio('theme', S.theme);
+    setRadio('mode', S.mode);
+    setRadio('chunk', S.chunk);
+    setRadio('reveal', S.reveal);
     $('apiKey').value = S.apiKey;
     $('model').value = S.model;
-    $('mode').value = S.mode;
-    $('chunk').value = S.chunk;
-    $('reveal').value = S.reveal;
     $('showEn').checked = !!S.showEn;
-    $('lightTheme').checked = !!S.light;
+    $('sizeRange').value = S.size; $('sizeVal').textContent = S.size;
     $('lines').value = S.lines; $('linesVal').textContent = S.lines;
     $('capLines').value = S.capLines; $('capLinesVal').textContent = S.capLines;
+    $('linesField').hidden = S.mode !== 'history';
     $('testResult').textContent = '';
     $('diag').hidden = true;
     $('chromeNote').textContent = ('Translator' in self)
@@ -845,16 +876,18 @@
   }
   function readSettings() {
     var changed = S.apiKey !== $('apiKey').value.trim() || S.model !== ($('model').value.trim() || DEFAULTS.model);
-    S.engine = $('engine').value;
+    S.engine = getRadio('engine') || S.engine;
+    S.theme = getRadio('theme') || S.theme;
+    S.mode = getRadio('mode') || S.mode;
+    S.chunk = getRadio('chunk') || S.chunk;
+    S.reveal = getRadio('reveal') || S.reveal;
     S.apiKey = $('apiKey').value.trim();
     S.model = $('model').value.trim() || DEFAULTS.model;
-    S.mode = $('mode').value;
-    S.chunk = $('chunk').value;
-    S.reveal = $('reveal').value;
     S.showEn = $('showEn').checked;
-    S.light = $('lightTheme').checked;
+    S.size = +$('sizeRange').value || S.size;
     S.lines = +$('lines').value;
     S.capLines = +$('capLines').value;
+    $('linesField').hidden = S.mode !== 'history';
     chromeTranslator = null;
     if (changed) { clearError(false); if (running) warm(); }
     save(); applyView();
@@ -862,6 +895,9 @@
   $('openSettings').onclick = openSettings;
   $('lines').oninput = function (e) { $('linesVal').textContent = e.target.value; };
   $('capLines').oninput = function (e) { $('capLinesVal').textContent = e.target.value; };
+  $('sizeRange').oninput = function (e) { $('sizeVal').textContent = e.target.value; };
+  // settings apply immediately (live preview behind the sheet)
+  $('settingsForm').addEventListener('change', readSettings);
   dlg.addEventListener('close', readSettings);
 
   var SAMPLE = 'so the main issue with the current supplier is';
@@ -953,7 +989,7 @@
     saveResult.textContent = '';
     $('saveInfo').textContent = st.count
       ? 'Sākums ' + C.formatDateTime(new Date(store.startedAt)) + ', ' + C.formatDuration(st.durationMs) +
-        ', ' + st.count + ' runas daļas, ' + st.words + ' vārdi.' + (dirty ? '' : ' Jau saglabāts.')
+        ', ' + C.plural(st.count, 'runas daļa', 'runas daļas') + ', ' + C.plural(st.words, 'vārds', 'vārdi') + '.' + (dirty ? '' : ' Jau saglabāts.')
       : 'Saruna vēl ir tukša.';
     ['saveShare', 'saveDownload', 'saveCopy'].forEach(function (id) { $(id).disabled = !st.count; });
     if (saveDlg.showModal) saveDlg.showModal(); else saveDlg.setAttribute('open', '');
@@ -1044,7 +1080,7 @@
   if (pendingRestore) {
     var rs = C.transcriptStats(pendingRestore);
     $('restoreText').textContent = 'Atrasta iepriekšējā saruna: sākums ' +
-      C.formatDateTime(new Date(pendingRestore.startedAt)) + ', ' + rs.count + ' runas daļas.';
+      C.formatDateTime(new Date(pendingRestore.startedAt)) + ', ' + C.plural(rs.count, 'runas daļa', 'runas daļas') + '.';
     $('restoreBar').hidden = false;
   }
   $('restoreYes').onclick = restore;
@@ -1068,6 +1104,8 @@
     liveChunk = null; lastRevealed = '';
     liveEn.textContent = '';
     unfreeze(false);
+    if (!running) document.body.classList.remove('started'); // back to the start screen
+    updateStatus();
     updateLag();
   };
 
@@ -1080,7 +1118,7 @@
   // test hook (harmless in production): lets the browser harness read numbers
   window.__tulks = {
     latencySummary: latencySummary, chunks: chunks, revealLog: [],
-    backlog: backlog, isFrozen: function () { return frozen; },
+    backlog: backlog, isFrozen: function () { return frozen; }, freeze: freeze,
     store: function () { return store; }, isDirty: function () { return dirty; }, persistNow: persistNow
   };
 })();

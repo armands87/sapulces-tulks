@@ -2,6 +2,24 @@
 
 Telefona tīmekļa lietotne (PWA): klausās angļu runu caur mikrofonu un uzreiz rāda latviešu tulkojumu lieliem burtiem. Paredzēta Chrome pārlūkam Android telefonā, kas sapulces laikā stāv uz galda blakus datoram un uz kuru skatās ar acs kaktiņu.
 
+## v6 (22.11): jauns, mierīgs interfeiss
+
+Lietotājam nepatika v5 izskats. v6 pārbūvē visu interfeisu, loģika nemainās (subtitri, lasīšanas temps, apturēšana un "Atpakaļ uz tiešraidi", saglabāšana un atjaunošana, diagnostika, ātruma tests).
+
+**Principi**: viena galvenā darbība katrā brīdī, viss pārējais paslēpts; teksts aizņem gandrīz visu ekrānu; vadība īkšķa sasniedzamībā apakšā; vienkārši latviski vārdi, nekādu "CC / 1 / ≡".
+
+1. **Sākuma ekrāns** (nekas vēl nav teikts): viena liela apaļa poga ar mikrofonu "Sākt", zem tās īss paskaidrojums. Augšā mazs statuss ("Gatavs") un diskrēta zobrata ikona. Ja nav OpenAI atslēgas, zem pogas "Pievienot OpenAI atslēgu". Iepriekšējās sarunas atjaunošana ir kartīte šajā ekrānā.
+2. **Klausoties**: ekrānā tikai teksts un mazs statuss augšā ("Klausās · 1,4 s", kavējuma uzlīme, ja atpaliek). Apakšā peldoša josla ar tikai būtisko: teksta izmērs (mazs A / liels A), "Saglabāt", "Apturēt". Josla un zobrats izgaist pēc 4 s; **pieskāriens tekstam** tos parāda atkal (vēl viens pieskāriens paslēpj). Josla neaizsedz tekstu un tās parādīšanās tekstu nepārbīda.
+3. **Pēc Apturēt**: teksts paliek, josla redzama pastāvīgi ar "Turpināt" (galvenā poga) un "Saglabāt".
+4. **Iestatījumi**: lapa, kas izslīd no apakšas, ar grupām: *Izskats* (tēma Tumšā / Gaišā / Automātiski, teksta izmērs, rādīšana Subtitri / Tikai teikums / Vēsture, redzamās rindas, angļu oriģināls), *Teksta plūsma* (parādīšanās ātrums, tulkošana pa īsām frāzēm / garākām / teikumiem), *Tulkošana* (OpenAI vai Chrome, atslēga, modelis, Pārbaudīt, Ātruma tests), *Cits* (Saglabāt sarunu, Pilnekrāns, Notīrīt ekrānu, Diagnostika). Izmaiņas redzamas uzreiz, aiz lapas.
+5. **Saglabāšana**: tāda pati lapa no apakšas, izvēles kā segmentu slēdži, viena galvenā poga "Saglabāt vai nosūtīt", zem tās "Lejupielādēt" un "Kopēt tekstu", apakšā "Jauna saruna".
+6. **Stils**: viena fontu kopa (Inter, ja ierīcē ir, citādi sistēmas fonts, piem. Roboto; nekādu ārēju pieprasījumu), viena akcenta krāsa (zila), sarkans tikai "Apturēt", dzintara krāsa tikai jaunākajiem vārdiem. Noapaļotas formas, pieskārienu laukumi 48 px, drošās zonas (iegriezumi, žestu josla), mierīgas pārejas (atslēdzas, ja telefonā ieslēgts "samazināt kustību"). Tumšā tēma pēc noklusējuma, gaišā un automātiskā (pēc telefona iestatījuma).
+7. Gramatika: "1 runas daļa", "21 vārds", "5 vārdi".
+
+**Viena apzināta izmaiņa uzvedībā**: v4/v5 pieskāriens tekstam apturēja skatu. Tagad pieskāriens parāda vadību, un skats apstājas tikai tad, ja **ritina uz augšu** (tad parādās "Atpakaļ uz tiešraidi"). Citādi katrs pieskāriens, lai nospiestu Apturēt vai Saglabāt, apturētu skatu.
+
+Ekrānuzņēmumi (390x844): `screens/1-start.png`, `2-listening-dark.png`, `3-listening-controls.png`, `4-settings.png`, `5-save.png`, `6-light.png`, `7-frozen.png`.
+
 ## v5 (22.11): sarunas saglabāšana
 
 - **Poga "Saglabāt"** augšējā joslā kreisajā pusē (zaļa). Pieejama arī pēc Apturēt un ⚙ → "Saglabāt sarunu…".
@@ -143,13 +161,13 @@ Runas atpazīšana (Google, caur Chrome) ir bez maksas.
 
 | Fails | Nozīme |
 |---|---|
-| `index.html`, `style.css` | Ekrāns: subtitru logs, A−/A+, režīms (CC / 1 / ≡), EN, fons, ⚙; apakšā statuss un Sākt/Apturēt |
+| `index.html`, `style.css` | v6 interfeiss: sākuma ekrāns, subtitri, apakšējā josla (izmērs, Saglabāt, Apturēt/Turpināt), iestatījumu un saglabāšanas lapas |
 | `app.js` | Runas atpazīšana ar automātisku restartu un sargsuni, frāžu dalītājs, paralēla straumēta tulkošana, kļūdu josla, aiztures mērījums, ātruma tests, Wake Lock, stenogramma |
 | `core.js` | Loģika bez DOM: frāžu dalītājs, uzdevums, kļūdu klasifikācija, sargsuņa lēmumi, straumes parsētājs |
-| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v5` |
-| `test/run-tests.js` | 97 loģikas testi (arī lasīšanas tempa un pieraksta testi), bez interneta un atslēgas |
+| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v6` |
+| `test/run-tests.js` | 98 loģikas testi (arī lasīšanas tempa, pieraksta un locījumu testi), bez interneta un atslēgas |
 | `test/mocks.js` | Viltots mikrofons (arī `MOCK.speak` ar runas ātrumu, `MOCK.slowCalls` lēna pieprasījuma testam) un viltots OpenAI (labi, iekāras, apstājas, 401, kredīts, 429; aizture `MOCK.ttft`) |
-| `test/demo.js` | Scenārijs ekrānuzņēmumiem (`#demo-dark`, `#demo-light`, `#demo-dark-frozen`, `#demo-light-frozen`) |
+| `test/demo.js` | Scenārijs ekrānuzņēmumiem (`#demo-start`, `#demo-dark`, `#demo-dark-controls`, `#demo-dark-settings`, `#demo-dark-save`, `#demo-dark-frozen`, `#demo-light-controls`) |
 | `test/make-icons.rb` | PNG ikonas |
 | `screens/` | Ekrānuzņēmumi lietotājam, nepublicēt |
 
@@ -196,7 +214,7 @@ Repozitorijs `armands87/sapulces-tulks`, adrese `https://armands87.github.io/sap
 
 Publicējamie faili: `index.html`, `style.css`, `core.js`, `app.js`, `sw.js`, `manifest.json`, `icons/`, `README.md`. `test/` var publicēt vai nepublicēt. **Nepublicē** `screens/` un nevienu lapu, kas ielādē `test/mocks.js`.
 
-Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v5`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
+Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v6`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
 
 ## Uzstādīšana telefonā
 
