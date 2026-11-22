@@ -12,7 +12,7 @@
   --hl-bg: transparent;
   --size: 40px;
   --lh: 1.32;
-  --caplines: 5;
+  --caplines: 7;
 }
 body.light {
   --bg: #fff;
@@ -112,22 +112,48 @@ body.running .caret { display: inline-block; }
 .pbreak { display: none; }
 
 /* ---------- Mode 1: captions (default) ----------
- * Fixed window of N lines in the middle of the screen. Text only ever grows at the end,
- * so earlier lines never re-flow. The newest line is always at the same height.
- * Older lines scroll up and fade out through the top mask. */
+ * Window of N lines in the middle of the screen. Text only grows at the end and is
+ * revealed word by word at a reading pace. Older text is never removed: it stays in a
+ * scrollable history above, only the top line is dimmed. Touch or scroll up = freeze. */
+#capWrap { display: contents; }
 body.mode-captions #feed { justify-content: center; }
+body.mode-captions #capWrap { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; }
 body.mode-captions #cap {
-  position: relative;
   height: calc(var(--size) * var(--lh) * var(--caplines));
-  overflow: hidden;
-  flex: none;
-  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.18) 0, rgba(0,0,0,.6) calc(var(--size) * var(--lh) * .9), #000 calc(var(--size) * var(--lh) * 1.6));
-          mask-image: linear-gradient(to bottom, rgba(0,0,0,.18) 0, rgba(0,0,0,.6) calc(var(--size) * var(--lh) * .9), #000 calc(var(--size) * var(--lh) * 1.6));
+  flex: 0 1 auto; min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0,0,0,.4) 0, #000 calc(var(--size) * var(--lh) * 1.5));
+          mask-image: linear-gradient(to bottom, rgba(0,0,0,.4) 0, #000 calc(var(--size) * var(--lh) * 1.5));
 }
+body.mode-captions #cap::-webkit-scrollbar { display: none; }
+body.mode-captions.frozen #cap { -webkit-mask-image: none; mask-image: none; }
 body.mode-captions #capText {
-  position: absolute; left: 0; right: 0; bottom: 0;
-  will-change: transform;
+  /* starts at the bottom line of the window, history grows upwards */
+  padding-top: calc(var(--size) * var(--lh) * (var(--caplines) - 1)); }
+.back-live {
+  position: fixed;
+  left: 50%; transform: translateX(-50%);
+  bottom: calc(env(safe-area-inset-bottom) + 92px);
+  z-index: 5;
+  background: var(--live-fg); color: #000;
+  font-size: 18px; font-weight: 700;
+  border-radius: 999px;
+  padding: 12px 20px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.45);
+  white-space: nowrap;
 }
+body.light .back-live { background: #1a1a1a; color: #fff; }
+.back-live[hidden] { display: none; }
+.lag {
+  font-size: 14px; font-weight: 600;
+  padding: 3px 10px; border-radius: 20px;
+  background: #ffb300; color: #000;
+  white-space: nowrap;
+}
+.lag[hidden] { display: none; }
+.footinfo { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; flex: none; }
 body.mode-captions .seg, body.mode-captions .seg .lv { display: inline; }
 body.mode-captions .pbreak { display: block; height: .3em; }
 body.mode-captions .chunk.live {

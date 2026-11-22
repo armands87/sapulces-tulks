@@ -2,6 +2,40 @@
 
 Telefona tīmekļa lietotne (PWA): klausās angļu runu caur mikrofonu un uzreiz rāda latviešu tulkojumu lieliem burtiem. Paredzēta Chrome pārlūkam Android telefonā, kas sapulces laikā stāv uz galda blakus datoram un uz kuru skatās ar acs kaktiņu.
 
+## v4 (22.11): vienmērīga parādīšanās, nekas nepazūd
+
+### Problēma (lietotāja atsauksme par v3)
+
+Pēc nelielas aiztures (tīkls vai runas atpazīšana) liels teksta gabals atnāca uzreiz, "saskrēja kopā", aizslīdēja uz augšu un pazuda, pirms to varēja izlasīt.
+
+### Kāpēc teksts nāca lielos gabalos
+
+1. **Runas atpazīšana pati mēdz kavēties** un pēc tam atdod daudz vārdu uzreiz. Frāžu dalītājs no tiem uzreiz izveidoja vairākas frāzes, tās tika tulkotas paralēli un atgriezās gandrīz vienlaikus.
+2. **Kārtībā turēšana**: ja viena frāze tulkojās lēni, nākamās jau bija gatavas, un, kad lēnā beidzot atnāca, viss parādījās uzreiz.
+3. **Straumes apstāšanās** mobilajā tīklā darbojās tāpat: pauze, tad uzreiz viss.
+4. v3 rādīja katru tulkoto vārdu tajā pašā mirklī, kad tas atnāca, un logs bija 5 rindas ar izbalināšanu augšā, tāpēc lēciens aiznesa tekstu ārpus redzamības.
+
+### Risinājums
+
+1. **Lasīšanas tempā (vārdu pa vārdam)**: tulkojumi nonāk rindā, un ekrānā vārdi parādās vienmērīgi, ~3,5 vārdi/s ("Normāli"). Ja rinda aug, temps paātrinās pakāpeniski (+0,35 vārdi/s par katru vārdu virs 4 rindā), bet ne ātrāk par 7 vārdiem/s. Nekas netiek izlaists vai apvienots. Pirmais vārds pēc klusuma parādās uzreiz, tāpēc parastā runā aizture nepieaug. Pēc teikuma beigām, ja rindā nav daudz, ir īsa 0,25 s elpas pauze. 40 vārdu "sprādziens" tiek parādīts ~7 s laikā, nevis vienā mirklī.
+2. **Kavējuma rādītājs**: apakšā pie statusa dzeltens "Kavējums 5 s · 18 v.", kad ekrāns atpaliek no runas par vairāk nekā 4 s vai 8 vārdiem.
+3. **Nekas nepazūd**: vecākais teksts netiek dzēsts (līdz 400 runas daļām), tas paliek ritināmā vēsturē virs tiešraides. Logs ir 7 rindas (iestatāms 4 līdz 12), tikai augšējā rinda ir nedaudz bālāka.
+4. **Apturēšana un "Atpakaļ uz tiešraidi"**: pieskaries tekstam vai ritini uz augšu, un skats apstājas (teksts turpina nākt fonā). Parādās poga "Atpakaļ uz tiešraidi · 12 jauni vārdi". Nospiežot to vai noritinot līdz apakšai, skats atkal seko tiešraidei.
+5. **Pauzes**: runas daļas elements ekrānā tiek izveidots tikai tad, kad parādās tās pirmais vārds, tāpēc klusuma laikā nekas nekustas. Jauna rinda tikai pēc īstas pauzes (>2,5 s), kā iepriekš.
+6. **Lēna pieprasījuma "nodrošināšana" (hedge)**: ja 3 s laikā nav atnācis neviens tulkojuma vārds, tiek nosūtīts otrs tāds pats pieprasījums; kurš pirmais sāk straumēt, tas uzvar, otrs tiek atcelts. Straumes klusuma noildze 4 s. Silts savienojums paliek.
+7. **Iestatījumi**: "Teksta parādīšanās ātrums": Lēnāk (2,5, līdz 5,5 vārdi/s) / Normāli (3,5, līdz 7) / Ātrāk (4,5, līdz 9). "Subtitru loga augstums": 4 līdz 12 rindas.
+
+Pārbaudīts pārlūkā ar viltotu mikrofonu un OpenAI (OpenAI 400 ms līdz pirmajam vārdam):
+- **Sprādziens**: 6 s klusums, tad 40 vārdi uzreiz. Sadalīti 6 frāzēs (līdz 8 vārdiem), 38 tulkotie vārdi parādījās ne ātrāk kā 7 vārdi/s (mazākā atstarpe 144 ms), pirmais pēc 0,44 s, visi 7,0 s laikā; kavējuma rādītājs parādījās.
+- **Nekas nepazūd**: ekrānā 48 vārdi = 48 tulkotie vārdi.
+- **Hedge**: pirmais pieprasījums "iekāras" (8 s), otrais pēc 3 s uzvar, frāze gatava 4,15 s (bez hedge būtu ~8,4 s).
+- **Apturēšana**: pēc pieskāriena skats nekustas, kamēr fonā nāk 9 jauni vārdi; poga rāda "9 jauni vārdi"; pēc pogas skats atkal apakšā, poga pazūd.
+- **Pauze**: 3 s klusumā nekas nekustas.
+
+Statusā "Klausās · X s" tagad ir laiks līdz brīdim, kad frāzes pirmais vārds **parādās ekrānā** (ar lasīšanas rindu). Diagnostikā ir sadalījums: gaidīšana uz frāzi, OpenAI, rinda ekrānā un cik vārdu gaida.
+
+Ekrānuzņēmumi (390x844, viltots mikrofons un OpenAI, nepublicēt): `screens/live-dark.png`, `screens/live-light.png`, `screens/frozen-dark.png`, `screens/frozen-light.png`.
+
 ## v3 (22.11): subtitru skats un mazāka aizture
 
 ### Problēma
@@ -12,16 +46,16 @@ v2 rādīja tulkojumu pa teikumiem. Teksts parādījās tikai pēc teikuma beig�
 
 Principi, pēc kuriem tas veidots (TV subtitri, telepromteris, tiešraides titri konferencēs):
 
-1. **Fiksēts logs ar 5 rindām ekrāna vidū.** Jaunākā rinda vienmēr ir tajā pašā vietā, tāpēc acs, uzmetot skatienu, uzreiz zina, kur skatīties.
+1. **Fiksēts logs ekrāna vidū** (v4: 7 rindas un ritināma vēsture). Jaunākā rinda vienmēr ir tajā pašā vietā, tāpēc acs, uzmetot skatienu, uzreiz zina, kur skatīties.
 2. **Teksts tikai pieaug beigās, nekas netiek pārrakstīts.** Runa tiek tulkota īsās frāzēs (~4 vārdi vai līdz pauzei). Katra frāze tiek pievienota beigās un pēc tam nemainās. Tā kā rindu pārnešana notiek tikai pēdējā rindā, augšējās rindas nekad nepārkārtojas.
 3. **Jaunākā frāze ir izcelta** ar mierīgu dzintara krāsu (baltajā fonā dzeltens marķieris), aiz tās mirgo kursors. Kad atnāk nākamā frāze, iepriekšējā lēni (0,9 s) kļūst parastā krāsā. Acs redz, kur ir "tagad", un var vienā skatienā izlasīt arī iepriekšējo rindu.
-4. **Vecākās rindas aizslīd uz augšu un izbalē** (maska augšējās 1,5 rindās). Jauna rinda ieslīd vienmērīgi (260 ms), bez lēciena.
+4. **Vecākās rindas aizslīd uz augšu** (v4: tās paliek ritināmā vēsturē, nekas netiek dzēsts).
 5. **Jauna runas daļa pēc garākas pauzes (>2,5 s) sākas jaunā rindā** ar nelielu atstarpi, tāpat kā rindkopa.
 6. **Kontrasts un lasāmība**: tumšajā fonā gandrīz balts (#f2f2f2, mazāk žilbina nekā tīri balts), treknraksts, rindstarpa 1,32, 40 px pēc noklusējuma (A−/A+ maina).
 7. **Angļu oriģināls** tikai kā viena bāla rindiņa zem loga (poga `EN`, pēc noklusējuma izslēgts).
 8. Statuss un lielā poga ir apakšā, augšējā josla ir tikai pogas un darba laikā ir bāla.
 
-Ekrānuzņēmumi (390x844, ar reālistisku tekstu, viltots mikrofons un OpenAI): `screens/live-dark.png`, `screens/live-light.png`, `screens/live-dark-en.png`. Tos nepublicē.
+(v3 ekrānuzņēmumi aizstāti ar v4 ekrānuzņēmumiem, skatīt augstāk.)
 
 Iepriekšējie režīmi paliek kā alternatīvas (poga `CC` → `1` → `≡`):
 - `1` **Tikai pašreizējais teikums**: liels pašreizējais teikums, iepriekšējais mazs virs tā.
@@ -83,10 +117,10 @@ Runas atpazīšana (Google, caur Chrome) ir bez maksas.
 | `index.html`, `style.css` | Ekrāns: subtitru logs, A−/A+, režīms (CC / 1 / ≡), EN, fons, ⚙; apakšā statuss un Sākt/Apturēt |
 | `app.js` | Runas atpazīšana ar automātisku restartu un sargsuni, frāžu dalītājs, paralēla straumēta tulkošana, kļūdu josla, aiztures mērījums, ātruma tests, Wake Lock, stenogramma |
 | `core.js` | Loģika bez DOM: frāžu dalītājs, uzdevums, kļūdu klasifikācija, sargsuņa lēmumi, straumes parsētājs |
-| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v3` |
-| `test/run-tests.js` | 66 loģikas testi, bez interneta un atslēgas |
-| `test/mocks.js` | Viltots mikrofons (arī `MOCK.speak` ar runas ātrumu) un viltots OpenAI (labi, iekāras, apstājas, 401, kredīts, 429; aizture `MOCK.ttft`) |
-| `test/demo.js` | Scenārijs ekrānuzņēmumiem (`#demo-dark`, `#demo-light`, `#demo-dark-en`) |
+| `sw.js`, `manifest.json`, `icons/` | PWA (pievienot sākuma ekrānam, pilnekrāns). Kešatmiņas versija `tulks-v4` |
+| `test/run-tests.js` | 79 loģikas testi (arī lasīšanas tempa testi), bez interneta un atslēgas |
+| `test/mocks.js` | Viltots mikrofons (arī `MOCK.speak` ar runas ātrumu, `MOCK.slowCalls` lēna pieprasījuma testam) un viltots OpenAI (labi, iekāras, apstājas, 401, kredīts, 429; aizture `MOCK.ttft`) |
+| `test/demo.js` | Scenārijs ekrānuzņēmumiem (`#demo-dark`, `#demo-light`, `#demo-dark-frozen`, `#demo-light-frozen`) |
 | `test/make-icons.rb` | PNG ikonas |
 | `screens/` | Ekrānuzņēmumi lietotājam, nepublicēt |
 
@@ -133,7 +167,7 @@ Repozitorijs `armands87/sapulces-tulks`, adrese `https://armands87.github.io/sap
 
 Publicējamie faili: `index.html`, `style.css`, `core.js`, `app.js`, `sw.js`, `manifest.json`, `icons/`, `README.md`. `test/` var publicēt vai nepublicēt. **Nepublicē** `screens/` un nevienu lapu, kas ielādē `test/mocks.js`.
 
-Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v3`). v3 vienreiz pārslēdz esošos iestatījumus uz subtitru režīmu; atslēga saglabājas.
+Pēc atjaunināšanas telefonā lietotni aizver un atver vēlreiz (service worker: "vispirms tīkls", kešatmiņa `tulks-v4`). v4 vienreiz iestata subtitru logu uz 7 rindām (vecākām versijām arī subtitru režīmu); atslēga saglabājas.
 
 ## Uzstādīšana telefonā
 

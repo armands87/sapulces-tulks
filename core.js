@@ -108,9 +108,11 @@
     if (remaining <= 0) return 0;
     if (event === 'final' || event === 'pause') return remaining;
     var avail = remaining - p.holdBack;
-    if (avail >= p.maxWords) return cutAtBoundary(words, committed, avail, p) || avail;
     if (avail < p.minWords) return 0;
-    return cutAtBoundary(words, committed, avail, p) || avail;
+    // never more than maxWords in one fragment: a burst of words becomes several
+    // small fragments that are translated in parallel and shown in order
+    var lim = Math.min(avail, p.maxWords);
+    return cutAtBoundary(words, committed, lim, p) || lim;
   }
 
   /* Prefer to end a chunk right before a conjunction ("... the budget | and then ..."). */
@@ -120,6 +122,39 @@
       if (BOUNDARY[next]) return n;
     }
     return 0;
+  }
+
+  /*
+   * Reading-paced reveal (v4). Translated words go into a queue and are shown one by
+   * one at a steady pace. The pace rises smoothly only when the backlog grows, up to a
+   * cap, so a burst of text never lands on screen at once.
+   * base/max: words per second. Latvian speech rate is ~2 w/s, so "normal" keeps up.
+   */
+  var REVEAL_PRESETS = {
+    slow:   { base: 2.5, max: 5.5 },
+    normal: { base: 3.5, max: 7 },
+    fast:   { base: 4.5, max: 9 }
+  };
+
+  function revealRate(backlog, presetName) {
+    var p = REVEAL_PRESETS[presetName] || REVEAL_PRESETS.normal;
+    var extra = backlog > 4 ? (backlog - 4) * 0.35 : 0;
+    return Math.min(p.max, p.base + extra);
+  }
+
+  /* Delay (ms) before the next word. A short breath after a sentence end when not behind. */
+  function revealDelay(backlog, presetName, lastWord) {
+    var d = 1000 / revealRate(backlog, presetName);
+    if (backlog < 4 && /[.!?]["')]*$/.test(lastWord || '')) d += 250;
+    return Math.round(d);
+  }
+
+  /* Words of a (possibly still streaming) translation that are complete enough to show. */
+  function availableWords(text, done) {
+    var t = text || '';
+    var w = t.split(/\s+/).filter(Boolean);
+    if (!done && w.length && !/\s$/.test(t)) w.pop(); // last token may be half a word
+    return w;
   }
 
   function median(arr) {
@@ -270,6 +305,10 @@
   }
 
   root.TCore = {
+    REVEAL_PRESETS: REVEAL_PRESETS,
+    revealRate: revealRate,
+    revealDelay: revealDelay,
+    availableWords: availableWords,
     CHUNK_PROMPT: CHUNK_PROMPT,
     CHUNK_PRESETS: CHUNK_PRESETS,
     buildChunkMessages: buildChunkMessages,

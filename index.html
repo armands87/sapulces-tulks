@@ -31,12 +31,18 @@
 
   <main id="feed">
     <p id="hint" class="hint">Nospied <b>Sākt</b> un novieto telefonu pie skaļruņa.<br>Pirmajā reizē atver ⚙ un ielīmē OpenAI atslēgu.</p>
-    <div id="cap"><div id="capText" aria-live="polite"><span id="caret" class="caret" aria-hidden="true"></span></div></div>
+    <div id="capWrap">
+      <div id="cap"><div id="capText" aria-live="polite"><span id="caret" class="caret" aria-hidden="true"></span></div></div>
+      <button id="backToLive" class="back-live" hidden>Atpakaļ uz tiešraidi</button>
+    </div>
     <div id="liveEn" aria-hidden="true"></div>
   </main>
 
   <footer>
-    <span id="status" class="status off" aria-live="polite">Gaida</span>
+    <div class="footinfo">
+      <span id="status" class="status off" aria-live="polite">Gaida</span>
+      <span id="lag" class="lag" hidden></span>
+    </div>
     <button id="startStop" class="big start">Sākt</button>
   </footer>
 
@@ -52,9 +58,18 @@
         </select>
       </label>
 
-      <label>Subtitru rindu skaits: <span id="capLinesVal"></span>
-        <input id="capLines" type="range" min="2" max="6" step="1">
+      <label>Subtitru loga augstums (rindas): <span id="capLinesVal"></span>
+        <input id="capLines" type="range" min="4" max="12" step="1">
       </label>
+
+      <label>Teksta parādīšanās ātrums
+        <select id="reveal">
+          <option value="slow">Lēnāk (~2,5 vārdi/s, līdz 5,5)</option>
+          <option value="normal">Normāli (~3,5 vārdi/s, līdz 7)</option>
+          <option value="fast">Ātrāk (~4,5 vārdi/s, līdz 9)</option>
+        </select>
+      </label>
+      <p class="note">Teksts parādās vārdu pa vārdam vienmērīgā tempā. Ja tulkojums atnāk lielā gabalā, temps tikai nedaudz paātrinās, nekas netiek izlaists. Pieskaries tekstam vai ritini uz augšu, lai apturētu skatu un pārlasītu.</p>
 
       <label>Tulkošanas solis
         <select id="chunk">

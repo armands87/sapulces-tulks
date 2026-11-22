@@ -1,8 +1,9 @@
-/* Sapulces tulks v3: live EN -> LV captions. Plain JS, no build step.
+/* Sapulces tulks v4: live EN -> LV captions with reading-paced reveal. Plain JS, no build.
  *
- * Pipeline: Chrome speech recognition (interim words) -> chunker commits short
- * stable fragments (~4 words, or at a pause) -> each fragment is translated at once
- * (parallel requests, streamed) -> appended to the screen in order, never rewritten.
+ * Pipeline: Chrome speech recognition (interim words) -> chunker commits short fragments
+ * -> each fragment translated at once (parallel, streamed, hedged) -> words go into a
+ * queue -> revealer shows them one by one at a readable pace, in spoken order.
+ * Nothing is ever removed from the screen while the user may still be reading.
  */
 (function () {
   'use strict';
@@ -10,19 +11,19 @@
   var $ = function (id) { return document.getElementById(id); };
 
   /* ---------- Settings (localStorage only) ---------- */
-  var SETTINGS_VERSION = 3;
+  var SETTINGS_VERSION = 4;
   var DEFAULTS = {
     v: SETTINGS_VERSION, apiKey: '', model: 'gpt-4.1-mini', engine: 'openai',
-    showEn: false, light: false, size: 40, lines: 7, capLines: 5,
-    mode: 'captions', chunk: 'short'
+    showEn: false, light: false, size: 40, lines: 7, capLines: 7,
+    mode: 'captions', chunk: 'short', reveal: 'normal'
   };
   var S = load();
   function load() {
     var s = {};
     try { s = JSON.parse(localStorage.getItem('tulks.settings') || '{}'); } catch (e) {}
-    if (s.v !== SETTINGS_VERSION) { // v3 introduced captions: switch older installs to it once
-      delete s.mode; delete s.interim;
-      if (s.size && s.size > 48) delete s.size;
+    if (s.v !== SETTINGS_VERSION) { // one-time migration to the v4 defaults
+      if (s.v !== 3) { delete s.mode; if (s.size && s.size > 48) delete s.size; }
+      delete s.interim; delete s.capLines;
     }
     var out = {};
     for (var k in DEFAULTS) out[k] = (k in s) ? s[k] : DEFAULTS[k];
@@ -38,30 +39,20 @@
   var diag = [];
   function log(msg) {
     diag.push(new Date().toTimeString().slice(0, 8) + ' ' + msg);
-    if (diag.length > 80) diag.shift();
+    if (diag.length > 100) diag.shift();
   }
-  var lat = []; // {wait, api, total} per chunk, ms
-  function recordLatency(c) {
-    var x = { wait: c.commitAt - c.seenAvg, api: c.firstAt - c.commitAt, total: c.firstAt - c.seenAvg };
-    lat.push(x);
-    if (lat.length > 200) lat.shift();
-    updateStatus();
-  }
+  var lat = []; // per chunk: {wait, api, shown}
   function latencySummary(n) {
-    var a = lat.slice(-(n || 30));
+    var a = lat.slice(-(n || 30)).filter(function (x) { return x.shown != null; });
     if (!a.length) return null;
-    return {
-      n: a.length,
-      total: C.median(a.map(function (x) { return x.total; })),
-      wait: C.median(a.map(function (x) { return x.wait; })),
-      api: C.median(a.map(function (x) { return x.api; }))
-    };
+    var med = function (k) { return C.median(a.map(function (x) { return x[k]; })); };
+    return { n: a.length, shown: med('shown'), wait: med('wait'), api: med('api'), net: med('net') };
   }
 
   /* ---------- Elements ---------- */
-  var feed = $('feed'), capText = $('capText'), caret = $('caret'), liveEn = $('liveEn');
-  var statusEl = $('status'), btn = $('startStop'), dlg = $('settings');
-  var errorBar = $('errorBar'), errorText = $('errorText');
+  var feed = $('feed'), cap = $('cap'), capText = $('capText'), caret = $('caret'), liveEn = $('liveEn');
+  var statusEl = $('status'), lagEl = $('lag'), btn = $('startStop'), dlg = $('settings');
+  var errorBar = $('errorBar'), errorText = $('errorText'), backBtn = $('backToLive');
   var MODES = ['captions', 'focus', 'history'];
   var MODE_LABEL = { captions: 'CC', focus: '1', history: '≡' };
 
@@ -76,8 +67,8 @@
     $('toggleEn').classList.toggle('on', !!S.showEn);
     $('toggleMode').textContent = MODE_LABEL[S.mode] || 'CC';
     document.querySelector('meta[name=theme-color]').content = S.light ? '#ffffff' : '#000000';
-    prevCapH = 0;
-    layout();
+    if (S.mode !== 'captions') unfreeze(false);
+    layout(true);
   }
 
   /* ---------- Errors and status ---------- */
@@ -98,19 +89,31 @@
   }
   $('errorClose').onclick = function () { lastError = null; errorBar.hidden = true; updateStatus(); };
 
-  /* ---------- Segments and chunks (the screen model) ----------
-   * seg  = one utterance (between recognizer finals), holds chunks.
-   * chunk = a translated fragment. Its text only ever grows while streaming. */
-  var segs = [];    // {el, lvEl, enEl, en, chunks: []}
-  var chunks = [];  // all chunks in spoken order
+  /* ---------- Screen model ----------
+   * seg   = one utterance. Its DOM is created only when its first word is revealed,
+   *         so pauses never move anything on screen.
+   * chunk = a translated fragment: data (lv text, done) + revealed word count. */
+  var segs = [];        // all segments (data)
+  var domSegs = [];     // segments that are on screen, in order
+  var chunks = [];      // all chunks in spoken order
+  var revealIdx = 0;    // index of the chunk being revealed
+  var revealTimer = null;
+  var lastRevealed = '';
+  var liveChunk = null;
   var lastSegEndAt = 0;
-  var liveIndex = -1;
 
-  function newSeg() {
+  function newSegData() {
+    var seg = { el: null, lvEl: null, enEl: null, en: '', chunks: [],
+      breakBefore: segs.length > 0 && Date.now() - lastSegEndAt > 2500 };
+    segs.push(seg);
+    return seg;
+  }
+
+  function ensureSegDom(seg) {
+    if (seg.el) return;
     document.body.classList.add('started');
-    var prev = segs[segs.length - 1];
-    if (prev) {
-      if (Date.now() - lastSegEndAt > 2500) {
+    if (domSegs.length) {
+      if (seg.breakBefore) {
         var br = document.createElement('span'); br.className = 'pbreak';
         capText.appendChild(br);
       } else {
@@ -121,70 +124,173 @@
     el.className = 'seg';
     el.innerHTML = '<span class="lv"></span><span class="en"></span>';
     capText.appendChild(el);
-    var seg = { el: el, lvEl: el.firstChild, enEl: el.lastChild, en: '', chunks: [] };
-    seg.lvEl.appendChild(caret);
-    segs.push(seg);
+    seg.el = el; seg.lvEl = el.firstChild; seg.enEl = el.lastChild;
+    seg.enEl.textContent = seg.en;
+    domSegs.push(seg);
     trimDom();
-    layout();
-    return seg;
+  }
+
+  function ensureChunkDom(c) {
+    if (c.el) return;
+    var seg = c.seg;
+    ensureSegDom(seg);
+    var hasPrev = false;
+    for (var i = 0; i < seg.chunks.length && seg.chunks[i] !== c; i++) if (seg.chunks[i].el) hasPrev = true;
+    if (hasPrev) seg.lvEl.appendChild(document.createTextNode(' '));
+    var span = document.createElement('span');
+    span.className = 'chunk' + (c.failed ? ' failed' : '');
+    seg.lvEl.appendChild(span);
+    c.el = span;
   }
 
   function addChunk(seg, en, seenAvg, endsSentence) {
-    var span = document.createElement('span');
-    span.className = 'chunk';
-    if (seg.chunks.length) seg.lvEl.insertBefore(document.createTextNode(' '), caret.parentNode === seg.lvEl ? caret : null);
-    seg.lvEl.insertBefore(span, caret.parentNode === seg.lvEl ? caret : null);
-    var c = { el: span, en: en, lv: '', index: chunks.length, seg: seg, endsSentence: endsSentence,
-      seenAvg: seenAvg, commitAt: Date.now(), firstAt: 0, done: false };
+    var c = { el: null, en: en, lv: '', index: chunks.length, seg: seg, endsSentence: endsSentence,
+      seenAvg: seenAvg, commitAt: Date.now(), firstAt: 0, done: false, failed: false, revealed: 0, lat: null };
     chunks.push(c);
     seg.chunks.push(c);
     translateChunk(c, 0);
     return c;
   }
 
-  function setLive(c) {
-    if (c.index <= liveIndex) return;
-    var old = chunks[liveIndex];
-    if (old) old.el.classList.remove('live');
-    liveIndex = c.index;
-    c.el.classList.add('live');
+  function wordsOf(c) {
+    if (c.failed && !c.lv) return C.availableWords(c.en, true);
+    return C.availableWords(c.lv, c.done || c.failed);
+  }
+
+  /* Words ready to show without skipping ahead of an unfinished earlier chunk. */
+  function backlog() {
+    var n = 0;
+    for (var i = revealIdx; i < chunks.length; i++) {
+      var c = chunks[i];
+      n += Math.max(0, wordsOf(c).length - c.revealed);
+      if (!c.done && !c.failed) break;
+    }
+    return n;
+  }
+
+  /* Called whenever translated text arrives. Starts the reveal loop if it is idle. */
+  function poke() {
+    if (!revealTimer) pump();
+    updateLag();
+  }
+
+  function pump() {
+    revealTimer = null;
+    if (!revealNext()) { updateLag(); return; }
+    var b = backlog();
+    if (b === 0 && !hasPendingWork()) { updateLag(); return; }
+    revealTimer = setTimeout(pump, C.revealDelay(b, S.reveal, lastRevealed));
+    updateLag();
+  }
+
+  function hasPendingWork() {
+    for (var i = revealIdx; i < chunks.length; i++) if (!chunks[i].done && !chunks[i].failed) return true;
+    return false;
+  }
+
+  function revealNext() {
+    var c = chunks[revealIdx];
+    while (c && (c.done || c.failed) && c.revealed >= wordsOf(c).length) { c = chunks[++revealIdx]; }
+    if (!c) return false;
+    var words = wordsOf(c);
+    if (c.revealed >= words.length) return false; // head-of-line chunk still streaming
+    var word = words[c.revealed];
+    if (c.revealed === 0 && (!lastRevealed || /[.!?]["')]*$/.test(lastRevealed))) {
+      word = word.charAt(0).toUpperCase() + word.slice(1);
+    }
+    ensureChunkDom(c);
+    c.el.textContent += (c.revealed ? ' ' : '') + word;
+    if (c.revealed === 0) {
+      if (c.lat) { c.lat.shown = Date.now() - c.seenAvg; updateStatus(); }
+      if (c.failed && !c.lv) c.el.classList.add('failed');
+    }
+    c.revealed++;
+    lastRevealed = word;
+    c.seg.lvEl.appendChild(caret);
+    if (liveChunk !== c) {
+      if (liveChunk && liveChunk.el) liveChunk.el.classList.remove('live');
+      liveChunk = c;
+      c.el.classList.add('live');
+    }
+    if (frozen) { newWhileFrozen++; updateBackBtn(); }
+    layout(false);
+    if (window.__tulks) window.__tulks.revealLog.push(Date.now());
+    return true;
+  }
+
+  /* Lag indicator: how far the screen is behind live speech. */
+  function updateLag() {
+    var b = backlog();
+    var c = chunks[revealIdx];
+    var sec = c && c.revealed < wordsOf(c).length ? (Date.now() - c.seenAvg) / 1000 : 0;
+    if (running && (b >= 8 || sec >= 4)) {
+      lagEl.hidden = false;
+      lagEl.textContent = 'Kavējums ' + Math.round(sec) + ' s · ' + b + ' v.';
+    } else {
+      lagEl.hidden = true;
+    }
   }
 
   function trimDom() {
-    var max = S.mode === 'history' ? S.lines + 20 : 40;
-    while (segs.length > max) {
-      var s = segs.shift();
+    var max = S.mode === 'history' ? S.lines + 40 : 400;
+    while (domSegs.length > max) {
+      var s = domSegs.shift();
       while (capText.firstChild && capText.firstChild !== s.el) capText.removeChild(capText.firstChild);
       capText.removeChild(s.el);
+      s.el = null;
     }
   }
 
-  /* Smoothly scroll the caption window when a new line appears (no jump). */
-  var prevCapH = 0;
-  function smoothShift() {
-    if (S.mode !== 'captions') return;
-    var h = capText.offsetHeight;
-    if (prevCapH && h > prevCapH + 2) {
-      var d = h - prevCapH;
-      capText.style.transition = 'none';
-      capText.style.transform = 'translateY(' + d + 'px)';
-      void capText.offsetHeight;
-      capText.style.transition = 'transform 260ms cubic-bezier(.2,.7,.3,1)';
-      capText.style.transform = 'translateY(0)';
-    }
-    prevCapH = h;
-  }
+  /* ---------- Scrolling, freeze and back to live ---------- */
+  var frozen = false, newWhileFrozen = 0, lastScrollTop = 0, userTouchAt = 0;
 
-  function layout() {
+  function atBottom() { return cap.scrollHeight - cap.clientHeight - cap.scrollTop < 6; }
+
+  function freeze() {
+    if (S.mode !== 'captions' || frozen) return;
+    frozen = true; newWhileFrozen = 0;
+    document.body.classList.add('frozen');
+    updateBackBtn();
+    log('freeze');
+  }
+  function unfreeze(scroll) {
+    if (!frozen) return;
+    frozen = false;
+    document.body.classList.remove('frozen');
+    backBtn.hidden = true;
+    if (scroll !== false) cap.scrollTo({ top: cap.scrollHeight, behavior: 'smooth' });
+    log('back to live');
+  }
+  function updateBackBtn() {
+    backBtn.hidden = false;
+    backBtn.textContent = 'Atpakaļ uz tiešraidi' + (newWhileFrozen ? ' · ' + newWhileFrozen + ' jauni vārdi' : '');
+  }
+  backBtn.onclick = function () { unfreeze(true); };
+
+  function onUserTouch() { userTouchAt = Date.now(); freeze(); }
+  cap.addEventListener('pointerdown', onUserTouch);
+  cap.addEventListener('touchstart', onUserTouch, { passive: true });
+  cap.addEventListener('wheel', onUserTouch, { passive: true });
+  cap.addEventListener('scroll', function () {
+    var t = cap.scrollTop;
+    var user = Date.now() - userTouchAt < 2500;
+    if (user && t < lastScrollTop - 4) freeze();                       // scrolled up
+    else if (user && frozen && t > lastScrollTop && atBottom()) unfreeze(false); // scrolled back down
+    lastScrollTop = t;
+  });
+
+  function layout(force) {
     if (S.mode === 'captions') {
-      segs.forEach(function (s) { s.el.style.display = ''; s.el.style.opacity = ''; s.el.classList.remove('current', 'prev'); });
-      smoothShift();
+      domSegs.forEach(function (s) { s.el.style.display = ''; s.el.style.opacity = ''; s.el.classList.remove('current', 'prev'); });
+      if (!frozen) {
+        var gap = cap.scrollHeight - cap.clientHeight - cap.scrollTop;
+        if (gap > 2) cap.scrollTo({ top: cap.scrollHeight, behavior: force || window.__noSmooth ? 'auto' : 'smooth' });
+      }
       return;
     }
-    capText.style.transform = '';
-    var styles = C.lineStyles(S.mode, segs.length, S.lines);
-    for (var i = 0; i < segs.length; i++) {
-      var el = segs[i].el, st = styles[i];
+    var styles = C.lineStyles(S.mode, domSegs.length, S.lines);
+    for (var i = 0; i < domSegs.length; i++) {
+      var el = domSegs[i].el, st = styles[i];
       el.style.display = st.show ? '' : 'none';
       el.style.opacity = S.mode === 'history' && st.show ? String(st.opacity) : '';
       el.classList.toggle('current', st.role === 'current');
@@ -196,6 +302,7 @@
   /* ---------- Translation ---------- */
   var chromeTranslator = null;
   var inflight = 0, lastApiAt = 0;
+  var HEDGE_MS = 3000;
 
   function hasKey() { return S.apiKey && S.apiKey.trim().length > 20; }
 
@@ -206,12 +313,16 @@
     return e;
   }
 
-  /* Streamed chat completion with total + stall timeouts. Always settles. */
+  /* Streamed chat completion with total + stall timeouts and external cancel. Always settles. */
   function openaiStream(body, onDelta, opts) {
     if (!hasKey()) return Promise.reject(makeErr(401, '{}'));
     opts = opts || {};
     var ctrl = new AbortController(), reason = '';
     function abort(why) { if (!reason) { reason = why; try { ctrl.abort(); } catch (e) {} } }
+    if (opts.signal) {
+      if (opts.signal.aborted) abort('cancel');
+      else opts.signal.addEventListener('abort', function () { abort('cancel'); });
+    }
     var total = setTimeout(function () { abort('timeout'); }, opts.timeoutMs || 10000);
     var stall = null;
     function armStall() { clearTimeout(stall); stall = setTimeout(function () { abort('stall'); }, opts.stallMs || 5000); }
@@ -285,54 +396,85 @@
     return { en: en.join(' '), lv: lv.join(' ') };
   }
 
-  /* Display-only capitalization: first chunk ever, or the previous chunk ended a sentence. */
-  function startsSentence(c) {
-    var prev = chunks[c.index - 1];
-    return !prev || /[.!?]["')]*\s*$/.test(prev.lv || '');
-  }
-
+  /*
+   * Translate one chunk. If no first token within HEDGE_MS, a second identical request
+   * is started; whichever streams first wins and the other is cancelled. Failures retry
+   * up to 2 times; if all fail, the English fragment is shown instead (dimmed).
+   */
   function translateChunk(c, attempt) {
     var ctx = contextBefore(c);
-    var onDelta = function (partial) {
-      if (!c.firstAt) { c.firstAt = Date.now(); if (attempt === 0) recordLatency(c); }
-      if (startsSentence(c)) partial = partial.charAt(0).toUpperCase() + partial.slice(1);
+    var body = C.buildChunkBody(S.model || DEFAULTS.model, c.en, ctx.en, ctx.lv, c.endsSentence);
+    var owner = null, pending = 0, finished = false, lastErr = null, ctrls = {}, hedge = null;
+
+    function onDelta(tag, partial) {
+      if (finished) return;
+      if (owner === null) {
+        owner = tag;
+        for (var k in ctrls) if (k !== tag) { try { ctrls[k].abort(); } catch (e) {} }
+        if (!c.firstAt) {
+          c.firstAt = Date.now();
+          c.lat = { wait: c.commitAt - c.seenAvg, api: c.firstAt - c.commitAt, net: c.firstAt - c.seenAvg, shown: null };
+          lat.push(c.lat); if (lat.length > 300) lat.shift();
+        }
+      }
+      if (owner !== tag) return;
       c.lv = partial;
-      c.el.textContent = partial;
-      setLive(c);
-      layout();
-    };
-    var p = S.engine === 'chrome'
-      ? chromeTranslate(c.en).then(function (t) { onDelta(t); return t; })
-      : openaiStream(C.buildChunkBody(S.model || DEFAULTS.model, c.en, ctx.en, ctx.lv, c.endsSentence), onDelta,
-        { timeoutMs: 10000, stallMs: 5000 });
-    p.then(function (full) {
-      c.done = true;
+      poke();
+    }
+    function launch(tag) {
+      var ctrl = new AbortController();
+      ctrls[tag] = ctrl; pending++;
+      var p = S.engine === 'chrome'
+        ? chromeTranslate(c.en).then(function (t) { onDelta(tag, t); return t; })
+        : openaiStream(body, function (t) { onDelta(tag, t); }, { signal: ctrl.signal, timeoutMs: 10000, stallMs: 4000 });
+      p.then(function (full) {
+        pending--;
+        if (finished) return;
+        if (owner === null) owner = tag;
+        if (owner === tag) finish(full);
+      }, function (e) {
+        pending--;
+        if (finished || e.cancelled) return;
+        if (owner === tag || pending === 0) fail(e);
+        else lastErr = e;
+      });
+    }
+    function finish(full) {
+      finished = true; clearTimeout(hedge);
       c.lv = full || c.lv;
-      c.el.textContent = c.lv;
-      if (!c.lv) { c.el.textContent = c.en; c.el.classList.add('failed'); }
+      c.done = true;
+      if (!c.lv) c.failed = true;
       clearError(false);
-      layout();
-    }, function (e) {
-      var info = e.info || { msg: String(e.message || e), retry: false, fatal: false };
+      poke();
+    }
+    function fail(e) {
+      finished = true; clearTimeout(hedge);
+      var info = e.info || (lastErr && lastErr.info) || { msg: String(e.message || e), retry: false, fatal: false };
       log('chunk #' + c.index + ' fail ' + attempt + ' status=' + e.status);
       if (info.retry && attempt < 2) {
         showError(info.msg, false);
-        c.firstAt = 0;
         setTimeout(function () { translateChunk(c, attempt + 1); }, C.retryDelay(attempt) / 2);
         return;
       }
       showError(info.msg, info.fatal);
-      if (!c.lv) { c.el.textContent = c.en; c.el.classList.add('failed'); } // English beats nothing
-      layout();
-    });
+      c.failed = true; // the revealer shows the English fragment instead
+      poke();
+    }
+
+    launch('a');
+    if (S.engine === 'openai') {
+      hedge = setTimeout(function () {
+        if (!finished && owner === null) { log('hedge #' + c.index); launch('b'); }
+      }, HEDGE_MS);
+    }
   }
 
   /* ---------- Chunker: turns recognizer words into fragments ---------- */
-  var utter = null; // {seg, words, committed, seenAt, lastChangeAt, text}
+  var utter = null;
   var pauseTimer = null;
 
   function ensureUtter() {
-    if (!utter) utter = { seg: newSeg(), words: [], committed: 0, seenAt: [], lastChangeAt: Date.now(), text: '' };
+    if (!utter) utter = { seg: newSegData(), words: [], committed: 0, seenAt: [], lastChangeAt: Date.now(), text: '' };
     return utter;
   }
 
@@ -343,7 +485,7 @@
     if (text !== u.text) { u.text = text; u.lastChangeAt = now; }
     u.words = words;
     u.seg.en = words.join(' ');
-    u.seg.enEl.textContent = u.seg.en;
+    if (u.seg.enEl) u.seg.enEl.textContent = u.seg.en;
     liveEn.textContent = C.tail(u.seg.en, 90);
   }
 
@@ -351,7 +493,7 @@
     var u = utter;
     if (!u) return;
     var p = preset();
-    for (var guard = 0; guard < 10; guard++) {
+    for (var guard = 0; guard < 20; guard++) {
       var n = C.planChunk(u.words, u.committed, event, p);
       if (!n) break;
       var from = u.committed, to = from + n;
@@ -383,15 +525,7 @@
     clearTimeout(pauseTimer);
     if (utter) {
       runChunker('final');
-      if (!utter.seg.chunks.length && !utter.words.length) {
-        // empty segment: remove it and its separator
-        var el = utter.seg.el;
-        if (el.previousSibling && el.previousSibling !== caret) capText.removeChild(el.previousSibling);
-        capText.removeChild(el);
-        segs.pop();
-        var last = segs[segs.length - 1];
-        if (last) last.lvEl.appendChild(caret);
-      }
+      if (!utter.seg.chunks.length) segs.splice(segs.indexOf(utter.seg), 1); // never shown
       lastSegEndAt = Date.now();
     }
     utter = null;
@@ -523,7 +657,7 @@
     else if (!active) { text = 'Restartē…'; kind = 'warn'; }
     else {
       var l = latencySummary(10);
-      text = 'Klausās' + (l ? ' · ' + (l.total / 1000).toFixed(1).replace('.', ',') + ' s' : '');
+      text = 'Klausās' + (l ? ' · ' + (l.shown / 1000).toFixed(1).replace('.', ',') + ' s' : '');
       kind = lastError ? (lastError.fatal ? 'err' : 'warn') : 'on';
     }
     statusEl.textContent = text;
@@ -567,7 +701,7 @@
     }
     clearError(false);
     running = true; fails = 0; notAllowedCount = 0;
-    log('START model=' + S.model + ' chunk=' + S.chunk + ' mode=' + S.mode);
+    log('START model=' + S.model + ' chunk=' + S.chunk + ' reveal=' + S.reveal + ' mode=' + S.mode);
     document.body.classList.add('running', 'started');
     btn.textContent = 'Apturēt'; btn.className = 'big stop';
     warm();
@@ -584,7 +718,7 @@
       else if (act === 'kick') { log('watchdog: kick'); lastEventAt = Date.now(); kick(); }
       if (running && !document.hidden && !wakeLock) lockScreen();
       if (running && Date.now() - lastApiAt > 40000) warm();
-      updateStatus();
+      updateStatus(); updateLag();
     }, 3000);
   }
 
@@ -598,7 +732,7 @@
     unlockScreen();
     document.body.classList.remove('running');
     btn.textContent = 'Sākt'; btn.className = 'big start';
-    updateStatus();
+    updateStatus(); updateLag();
   }
 
   btn.addEventListener('click', function () { running ? stop() : start(); });
@@ -624,6 +758,7 @@
     $('model').value = S.model;
     $('mode').value = S.mode;
     $('chunk').value = S.chunk;
+    $('reveal').value = S.reveal;
     $('showEn').checked = !!S.showEn;
     $('lightTheme').checked = !!S.light;
     $('lines').value = S.lines; $('linesVal').textContent = S.lines;
@@ -642,6 +777,7 @@
     S.model = $('model').value.trim() || DEFAULTS.model;
     S.mode = $('mode').value;
     S.chunk = $('chunk').value;
+    S.reveal = $('reveal').value;
     S.showEn = $('showEn').checked;
     S.light = $('lightTheme').checked;
     S.lines = +$('lines').value;
@@ -709,14 +845,16 @@
     d.hidden = !d.hidden;
     d.textContent =
       (l ? 'Aizture (mediāna, pēdējie ' + l.n + ' gabali):\n' +
-        '  runa atpazīta → tulkojums uz ekrāna: ' + l.total + ' ms\n' +
-        '    no tā gaidīšana uz frāzi: ' + l.wait + ' ms\n' +
+        '  runa atpazīta → pirmais vārds uz ekrāna: ' + l.shown + ' ms\n' +
+        '    gaidīšana uz frāzi: ' + l.wait + ' ms\n' +
         '    OpenAI līdz pirmajam vārdam: ' + l.api + ' ms\n' +
-        '  (+ Google runas atpazīšana, ap 300 līdz 700 ms, nav izmērāma)\n\n'
+        '    rinda uz ekrāna (lasīšanas temps): ' + Math.max(0, l.shown - l.net) + ' ms\n' +
+        '  (+ Google runas atpazīšana, ap 300 līdz 700 ms, nav izmērāma)\n' +
+        '  rindā gaida: ' + backlog() + ' vārdi\n\n'
         : 'Aizture: vēl nav datu\n\n') +
       'running=' + running + ' active=' + active + ' starting=' + starting +
       ' inflight=' + inflight + ' fails=' + fails + ' wakeLock=' + !!wakeLock +
-      ' model=' + S.model + ' chunk=' + S.chunk + '\n' +
+      ' model=' + S.model + ' chunk=' + S.chunk + ' reveal=' + S.reveal + '\n' +
       (diag.length ? diag.slice().reverse().join('\n') : '(tukšs)');
   };
   $('saveText').onclick = function () {
@@ -732,11 +870,17 @@
   };
   $('clearText').onclick = function () {
     endUtter();
-    segs.forEach(function (s) { s.el.remove(); });
+    // mark everything as already shown, then empty the screen
+    chunks.forEach(function (c) { c.revealed = 1e9; c.done = true; });
+    revealIdx = chunks.length;
+    domSegs.forEach(function (s) { s.el = null; });
+    domSegs = [];
     while (capText.firstChild) capText.removeChild(capText.firstChild);
     capText.appendChild(caret);
-    segs = []; liveIndex = chunks.length - 1; prevCapH = 0;
+    liveChunk = null; lastRevealed = '';
     liveEn.textContent = '';
+    unfreeze(false);
+    updateLag();
   };
 
   /* ---------- Init ---------- */
@@ -745,6 +889,9 @@
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(function () {});
   }
-  // test hook (harmless in production): lets the browser harness read latency numbers
-  window.__tulks = { latencySummary: latencySummary, chunks: chunks };
+  // test hook (harmless in production): lets the browser harness read numbers
+  window.__tulks = {
+    latencySummary: latencySummary, chunks: chunks, revealLog: [],
+    backlog: backlog, isFrozen: function () { return frozen; }
+  };
 })();

@@ -1,5 +1,5 @@
 /* Simple app-shell cache. API calls (api.openai.com) are never cached. */
-var CACHE = 'tulks-v3';
+var CACHE = 'tulks-v4';
 var SHELL = ['./', 'index.html', 'style.css', 'core.js', 'app.js', 'manifest.json',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'];
 
